@@ -9,6 +9,8 @@
     "Incident Angle": "incident_angle",
     "Linear Offset": "linear_offset",
     "Rotations": "rotations",
+    "RPM": "rpm",
+    "Power": "power",
     "Thickness": "thickness",
     "RS": "rs",
     "RSU": "rsu",
@@ -58,6 +60,26 @@
       "is_coupled": false,
       "coupling_group": null
     },
+    "rpm": {
+      "type": "continuous",
+      "min_value": 0.0,
+      "max_value": 0.0,
+      "step": 0.0,
+      "allowed_values": null,
+      "is_enabled": false,
+      "is_coupled": false,
+      "coupling_group": null
+    },
+    "power": {
+      "type": "continuous",
+      "min_value": 0.0,
+      "max_value": 0.0,
+      "step": 0.0,
+      "allowed_values": null,
+      "is_enabled": false,
+      "is_coupled": false,
+      "coupling_group": null
+    },
     "o2_flow": {
       "type": "continuous",
       "min_value": 0.0,
@@ -83,11 +105,30 @@
     "method": "windowed_median",
     "lifetime_bin_count": 10
   },
+  "feature_config": {
+    "numeric_features": [
+      "lifetime",
+      "lifetime_used",
+      "lifetime_end",
+      "incident_angle",
+      "linear_offset",
+      "rotations",
+      "rpm",
+      "power",
+      "ar_flow",
+      "o2_flow",
+      "o2_ratio",
+      "total_flow"
+    ],
+    "categorical_features": ["target_id"]
+  },
   "model_settings": {
     "rs_model": "gbr",
     "thickness_model": "gbr",
     "rsu_model": "gbr",
-    "enable_classifier": false
+    "enable_classifier": false,
+    "random_state": 0,
+    "test_fraction": 0.2
   },
   "optimizer_weights": {
     "w_rs": 1.0,
@@ -95,6 +136,10 @@
     "w_rsu": 1.0,
     "w_move": 0.1,
     "w_margin": 0.1
+  }
+  ,
+  "material_overrides": {
+    "materials": {}
   }
 }
 

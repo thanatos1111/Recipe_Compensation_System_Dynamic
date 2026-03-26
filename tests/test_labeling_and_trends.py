@@ -16,6 +16,8 @@ class TestLabelingAndTrends(unittest.TestCase):
                 "incident_angle": [1.0, 2.0, 3.0],
                 "linear_offset": [0.1, 0.2, 0.3],
                 "rotations": [10, 11, 12],
+                "rpm": [60.0, 60.0, 60.0],
+                "power": [1000.0, 1000.0, 1000.0],
                 "ar_flow": [10.0, 10.0, 10.0],
                 "o2_flow": [5.0, 5.0, 5.0],
                 "thickness": [99.0, 101.0, 103.0],
@@ -56,6 +58,11 @@ class TestLabelingAndTrends(unittest.TestCase):
         self.assertIn("delta_incident_angle", labeled.columns)
         self.assertTrue(pd.isna(labeled.loc[0, "delta_incident_angle"]))
         self.assertAlmostEqual(float(labeled.loc[1, "delta_incident_angle"]), 1.0, places=6)
+
+        # lifetime_used and lifetime_end derived from rpm/rotations/power and starting lifetime.
+        # lifetime_used = 1000/1000 * (10/60/60) = 10/3600
+        self.assertAlmostEqual(float(labeled.loc[0, "lifetime_used"]), 10.0 / 3600.0, places=9)
+        self.assertAlmostEqual(float(labeled.loc[0, "lifetime_end"]), 0.0 + (10.0 / 3600.0), places=9)
 
     def test_quantize_series_to_step(self) -> None:
         values = pd.Series([1.1, 1.4, 1.6])

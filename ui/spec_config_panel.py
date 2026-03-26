@@ -37,6 +37,23 @@ class SpecConfigPanel(QWidget):
 
         layout.addWidget(QLabel("Spec config (Milestone 3)"))
 
+        self.save_per_target_checkbox = QCheckBox("Save/apply spec for active Target ID only (otherwise per material)")
+        self.save_per_target_checkbox.setChecked(True)
+        layout.addWidget(self.save_per_target_checkbox)
+
+        self.max_lifetime_checkbox = QCheckBox("Enable max lifetime (kW*h) for this material/target")
+        self.max_lifetime_checkbox.setChecked(False)
+        layout.addWidget(self.max_lifetime_checkbox)
+
+        max_lt_row = QHBoxLayout()
+        max_lt_row.addWidget(QLabel("Max lifetime"))
+        self.max_lifetime_spin = QDoubleSpinBox()
+        self.max_lifetime_spin.setRange(0.0, 1e9)
+        self.max_lifetime_spin.setDecimals(6)
+        self.max_lifetime_spin.setValue(0.0)
+        max_lt_row.addWidget(self.max_lifetime_spin)
+        layout.addLayout(max_lt_row)
+
         # Enable/disable individual spec components.
         self.rs_enabled_checkbox = QCheckBox("Enable RS spec filtering")
         self.rs_enabled_checkbox.setChecked(True)
@@ -173,6 +190,7 @@ class SpecConfigPanel(QWidget):
         self.rs_enabled_checkbox.toggled.connect(self._update_enabled_states)
         self.th_enabled_checkbox.toggled.connect(self._update_enabled_states)
         self.rsu_enabled_checkbox.toggled.connect(self._update_rsu_enabled_state)
+        self.max_lifetime_checkbox.toggled.connect(self._update_max_lifetime_state)
 
         rs_group_layout = rs_layout
         rs_group.setLayout(rs_group_layout)
@@ -185,6 +203,9 @@ class SpecConfigPanel(QWidget):
         layout.addWidget(apply_button)
 
         self.setLayout(layout)
+
+    def _update_max_lifetime_state(self) -> None:
+        self.max_lifetime_spin.setEnabled(self.max_lifetime_checkbox.isChecked())
 
     def _update_rsu_enabled_state(self) -> None:
         enabled = self.rsu_enabled_checkbox.isChecked()
@@ -267,7 +288,14 @@ class SpecConfigPanel(QWidget):
             use_rsu_spec=rsu_enabled,
         )
 
-        self.specApplied.emit(spec_config)
+        self.specApplied.emit(
+            {
+                "spec_config": spec_config,
+                "save_per_target": bool(self.save_per_target_checkbox.isChecked()),
+                "max_lifetime_enabled": bool(self.max_lifetime_checkbox.isChecked()),
+                "max_lifetime_value": float(self.max_lifetime_spin.value()),
+            }
+        )
 
     def set_spec_config(self, spec_config: SpecConfig) -> None:
         """Update the panel from a SpecConfig object."""
@@ -298,4 +326,5 @@ class SpecConfigPanel(QWidget):
 
         self._update_enabled_states()
         self._update_rsu_enabled_state()
+        self._update_max_lifetime_state()
 

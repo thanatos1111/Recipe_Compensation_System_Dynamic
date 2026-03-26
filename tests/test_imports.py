@@ -3,6 +3,7 @@ import unittest
 
 
 CORE_MODULES = [
+    "core.config_store",
     "core.material_manager",
     "core.importer",
     "core.schemas",

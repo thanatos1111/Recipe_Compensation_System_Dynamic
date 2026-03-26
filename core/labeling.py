@@ -33,6 +33,26 @@ def compute_derived_features(df: pd.DataFrame, spec_config: SpecConfig) -> pd.Da
         out["total_flow"] = pd.NA
         out["o2_ratio"] = pd.NA
 
+    # Lifetime usage model.
+    # Raw `lifetime` is interpreted as the *starting* lifetime for the record.
+    # lifetime_used = power/1000 * (rotations/rpm/60)
+    # lifetime_end = lifetime + lifetime_used
+    if {"power", "rotations", "rpm", "lifetime"}.issubset(out.columns):
+        power = pd.to_numeric(out["power"], errors="coerce")
+        rotations = pd.to_numeric(out["rotations"], errors="coerce")
+        rpm = pd.to_numeric(out["rpm"], errors="coerce")
+        lifetime_start = pd.to_numeric(out["lifetime"], errors="coerce")
+
+        # Avoid division by zero / negative rpm.
+        duration_hours = rotations / rpm / 60.0
+        duration_hours = duration_hours.where((rpm > 0) & duration_hours.notna(), pd.NA)
+
+        out["lifetime_used"] = (power / 1000.0) * duration_hours
+        out["lifetime_end"] = lifetime_start + out["lifetime_used"]
+    else:
+        out["lifetime_used"] = pd.NA
+        out["lifetime_end"] = pd.NA
+
     # RS derived features (for explainability).
     if spec_config.use_rs_target_mode and spec_config.rs_target is not None and "rs" in out.columns:
         out["rs_error"] = out["rs"] - float(spec_config.rs_target)
@@ -58,7 +78,7 @@ def compute_derived_features(df: pd.DataFrame, spec_config: SpecConfig) -> pd.Da
         out["thickness_error"] = pd.NA
 
     # Delta recipe parameter values within each target instance.
-    delta_params = ["incident_angle", "linear_offset", "rotations", "ar_flow", "o2_flow"]
+    delta_params = ["incident_angle", "linear_offset", "rotations", "rpm", "power", "ar_flow", "o2_flow"]
     if "target_id" in out.columns and "lifetime" in out.columns:
         for param in delta_params:
             if param in out.columns:

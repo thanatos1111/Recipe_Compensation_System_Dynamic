@@ -13,8 +13,9 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-from PySide6.QtWidgets import QLabel, QMainWindow, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QMainWindow, QMenu, QMenuBar, QTabWidget, QVBoxLayout, QWidget
 
+from core.config_store import load_effective_config, load_user_config, save_user_config
 from core.material_manager import MaterialManager
 from core.labeling import compute_derived_features
 from core.schemas import SpecConfig
@@ -27,6 +28,7 @@ from ui.trend_panel import TrendPanel
 from ui.model_panel import ModelPanel
 from ui.recommendation_panel import RecommendationPanel
 from ui.update_panel import UpdatePanel
+from ui.settings_dialog import SettingsDialog
 
 
 class MainWindow(QMainWindow):
@@ -38,10 +40,14 @@ class MainWindow(QMainWindow):
         self._current_material: Optional[str] = None
         self._current_target_id: Optional[str] = None
         self._spec_config: SpecConfig = SpecConfig()
+        self._max_lifetime: Optional[float] = None
 
-        self.config = self._load_default_config()
+        self.project_root = Path(__file__).resolve().parents[1]
+        self.user_config = load_user_config(self.project_root)
+
+        self.config = load_effective_config(self.project_root)
         self.column_map = self.config.get("column_mapping", {})
-        self._spec_config = self._spec_config_from_config(self.config)
+        self._spec_config = self._spec_config_from_config(self.config.get("spec_settings", {}))
 
         central = QWidget()
         layout = QVBoxLayout()
@@ -61,6 +67,9 @@ class MainWindow(QMainWindow):
         self.target_instance_selector.targetSelected.connect(self._on_target_selected)
 
         self.trend_panel = TrendPanel()
+        self.model_panel = ModelPanel()
+
+        self._setup_menu()
 
         # Tabbed layout to avoid vertical "squeezy" stacking (matches spec panels A–H).
         self.tabs = QTabWidget()
@@ -73,7 +82,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.spec_panel, "D. Spec config")
 
         self.tab_trends_index = self.tabs.addTab(self.trend_panel, "E. Trends")
-        self.tabs.addTab(ModelPanel(), "F. Model")
+        self.tab_model_index = self.tabs.addTab(self.model_panel, "F. Model")
         self.tabs.addTab(RecommendationPanel(), "G. Recommendation")
         self.tabs.addTab(UpdatePanel(), "H. Update")
 
@@ -85,6 +94,33 @@ class MainWindow(QMainWindow):
         central.setLayout(layout)
         self.setCentralWidget(central)
 
+    def _setup_menu(self) -> None:
+        menubar = QMenuBar(self)
+        self.setMenuBar(menubar)
+
+        settings_menu = QMenu("Settings", self)
+        menubar.addMenu(settings_menu)
+
+        action_constraints = settings_menu.addAction("Edit parameter constraints (JSON)...")
+        action_constraints.triggered.connect(self._edit_parameter_constraints)
+
+    def _edit_parameter_constraints(self) -> None:
+        current = self.config.get("parameter_constraints", {})
+
+        def on_save(new_constraints: dict[str, Any]) -> None:
+            # Persist to user_config and update effective config in-memory.
+            self.user_config["parameter_constraints"] = new_constraints
+            save_user_config(self.project_root, self.user_config)
+            self.config = load_effective_config(self.project_root)
+
+        dlg = SettingsDialog(
+            title="Parameter constraints",
+            initial_value=current,
+            on_save=on_save,
+            parent=self,
+        )
+        dlg.exec()
+
     def _on_tab_changed(self, _index: int) -> None:
         if _index != self.tab_trends_index:
             return
@@ -94,31 +130,56 @@ class MainWindow(QMainWindow):
         if self._current_target_id in dataset.target_instances:
             self.trend_panel.set_context(dataset, active_target_id=self._current_target_id, config=self.config)
 
-    def _load_default_config(self) -> dict[str, Any]:
-        config_path = Path(__file__).resolve().parents[1] / "config" / "default_config.json"
-        with config_path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-
-    def _spec_config_from_config(self, cfg: dict[str, Any]) -> SpecConfig:
-        spec = cfg.get("spec_settings", {})
+    def _spec_config_from_config(self, spec: dict[str, Any]) -> SpecConfig:
         rsu_max = float(spec.get("rsu_max", 0.0) or 0.0)
         return SpecConfig(
-            rs_target=spec.get("rs_target", None),
-            rs_min=spec.get("rs_min", None),
-            rs_max=spec.get("rs_max", None),
-            rs_tol=spec.get("rs_tol", None),
-            thickness_target=spec.get("thickness_target", None),
-            thickness_min=spec.get("thickness_min", None),
-            thickness_max=spec.get("thickness_max", None),
-            thickness_tol=spec.get("thickness_tol", None),
+            rs_target=spec.get("rs_target"),
+            rs_min=spec.get("rs_min"),
+            rs_max=spec.get("rs_max"),
+            rs_tol=spec.get("rs_tol"),
+            thickness_target=spec.get("thickness_target"),
+            thickness_min=spec.get("thickness_min"),
+            thickness_max=spec.get("thickness_max"),
+            thickness_tol=spec.get("thickness_tol"),
             rsu_max=rsu_max,
             use_rs_target_mode=bool(spec.get("use_rs_target_mode", False)),
             use_thickness_target_mode=bool(spec.get("use_thickness_target_mode", False)),
             # Default enable flags based on numeric thresholds.
-            use_rs_spec=True,
-            use_thickness_spec=True,
-            use_rsu_spec=rsu_max > 0,
+            use_rs_spec=bool(spec.get("use_rs_spec", True)),
+            use_thickness_spec=bool(spec.get("use_thickness_spec", True)),
+            use_rsu_spec=bool(spec.get("use_rsu_spec", rsu_max > 0)),
         )
+
+    def _get_override_block(self, material_name: str) -> dict[str, Any]:
+        return (
+            self.config.get("material_overrides", {})
+            .get("materials", {})
+            .get(material_name, {})
+        )
+
+    def _get_effective_spec_for_selection(self, material_name: str, target_id: Optional[str]) -> SpecConfig:
+        base_spec = self.config.get("spec_settings", {})
+        material_block = self._get_override_block(material_name)
+        material_spec = material_block.get("spec_settings", {})
+        target_spec = {}
+        if target_id:
+            target_spec = material_block.get("targets", {}).get(target_id, {}).get("spec_settings", {})
+
+        # Merge base -> material -> target
+        merged = dict(base_spec)
+        merged.update(material_spec or {})
+        merged.update(target_spec or {})
+        return self._spec_config_from_config(merged)
+
+    def _get_effective_max_lifetime(self, material_name: str, target_id: Optional[str]) -> Optional[float]:
+        material_block = self._get_override_block(material_name)
+        # target overrides material
+        if target_id:
+            v = material_block.get("targets", {}).get(target_id, {}).get("max_lifetime", None)
+            if v is not None:
+                return float(v)
+        v2 = material_block.get("max_lifetime", None)
+        return float(v2) if v2 is not None else None
 
     def _open_workbook(self, workbook_path: str) -> None:
         self.material_manager.clear()
@@ -135,6 +196,12 @@ class MainWindow(QMainWindow):
     def _on_material_selected(self, material_name: str) -> None:
         self._current_material = material_name
         dataset = self.material_manager.get_material(material_name)
+
+        # Load effective spec/max_lifetime for this material (target-specific applied after target selection).
+        self._spec_config = self._get_effective_spec_for_selection(material_name, None)
+        self._max_lifetime = self._get_effective_max_lifetime(material_name, None)
+        self.spec_panel.set_spec_config(self._spec_config)
+
         self._apply_spec_and_derived_to_material(dataset)
 
         target_ids = self.material_manager.get_target_instance_ids(material_name)
@@ -154,11 +221,29 @@ class MainWindow(QMainWindow):
         if instance is None:
             self.raw_table_panel.set_dataframe(None)  # type: ignore[arg-type]
             return
+
+        # Apply target-specific overrides for spec/max_lifetime.
+        self._spec_config = self._get_effective_spec_for_selection(self._current_material, target_id)
+        self._max_lifetime = self._get_effective_max_lifetime(self._current_material, target_id)
+        self.spec_panel.set_spec_config(self._spec_config)
+
+        self._apply_spec_and_derived_to_material(dataset)
+        self.raw_table_panel.set_material_dataframe(dataset.all_records)
+
         self.raw_table_panel.set_active_target_id(target_id)
         # Ensure the trend panel uses labeled records.
         self.trend_panel.set_context(dataset, active_target_id=target_id, config=self.config)
+        self.model_panel.set_context(dataset, active_target_id=target_id, config=self.config)
 
-    def _on_spec_applied(self, spec_config: SpecConfig) -> None:
+    def _on_spec_applied(self, payload: Any) -> None:
+        # Payload comes from SpecConfigPanel (spec + persistence options).
+        if not isinstance(payload, dict) or "spec_config" not in payload:
+            return
+        spec_config: SpecConfig = payload["spec_config"]
+        save_per_target = bool(payload.get("save_per_target", True))
+        max_lt_enabled = bool(payload.get("max_lifetime_enabled", False))
+        max_lt_value = float(payload.get("max_lifetime_value", 0.0))
+
         self._spec_config = spec_config
         if not self._current_material:
             return
@@ -172,6 +257,68 @@ class MainWindow(QMainWindow):
         active_target_id = self._current_target_id
         if active_target_id and active_target_id in dataset.target_instances:
             self.trend_panel.set_context(dataset, active_target_id=active_target_id, config=self.config)
+
+        # Persist overrides to user_config.json
+        self._persist_spec_and_lifetime_overrides(
+            material_name=self._current_material,
+            target_id=self._current_target_id,
+            spec_config=spec_config,
+            save_per_target=save_per_target,
+            max_lifetime=(max_lt_value if max_lt_enabled else None),
+        )
+
+        # Reload effective config (so newly-saved overrides are reflected).
+        self.user_config = load_user_config(self.project_root)
+        self.config = load_effective_config(self.project_root)
+
+    def _persist_spec_and_lifetime_overrides(
+        self,
+        *,
+        material_name: str,
+        target_id: Optional[str],
+        spec_config: SpecConfig,
+        save_per_target: bool,
+        max_lifetime: Optional[float],
+    ) -> None:
+        uc = dict(self.user_config) if isinstance(self.user_config, dict) else {}
+        mo = uc.setdefault("material_overrides", {})
+        mats = mo.setdefault("materials", {})
+        mat_block = mats.setdefault(material_name, {})
+
+        spec_dict = {
+            "rs_target": spec_config.rs_target,
+            "rs_min": spec_config.rs_min,
+            "rs_max": spec_config.rs_max,
+            "rs_tol": spec_config.rs_tol,
+            "thickness_target": spec_config.thickness_target,
+            "thickness_min": spec_config.thickness_min,
+            "thickness_max": spec_config.thickness_max,
+            "thickness_tol": spec_config.thickness_tol,
+            "rsu_max": spec_config.rsu_max,
+            "use_rs_target_mode": spec_config.use_rs_target_mode,
+            "use_thickness_target_mode": spec_config.use_thickness_target_mode,
+            "use_rs_spec": spec_config.use_rs_spec,
+            "use_thickness_spec": spec_config.use_thickness_spec,
+            "use_rsu_spec": spec_config.use_rsu_spec,
+        }
+
+        if save_per_target and target_id:
+            targets = mat_block.setdefault("targets", {})
+            tblock = targets.setdefault(target_id, {})
+            tblock["spec_settings"] = spec_dict
+            if max_lifetime is not None:
+                tblock["max_lifetime"] = max_lifetime
+            elif "max_lifetime" in tblock:
+                # remove if disabled
+                tblock.pop("max_lifetime", None)
+        else:
+            mat_block["spec_settings"] = spec_dict
+            if max_lifetime is not None:
+                mat_block["max_lifetime"] = max_lifetime
+            elif "max_lifetime" in mat_block:
+                mat_block.pop("max_lifetime", None)
+
+        save_user_config(self.project_root, uc)
 
     def _apply_spec_and_derived_to_material(self, dataset: Any) -> None:
         """

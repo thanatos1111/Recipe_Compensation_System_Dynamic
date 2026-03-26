@@ -90,6 +90,27 @@ def normalize_material_sheet(
             # Missing columns are handled as warnings later.
             out[canonical_col] = pd.NA
 
+    # Heuristic fallbacks for commonly-extended columns not present in mapping.
+    # This helps when headers look like "rpm(rotation velocity)" or "Power(W)".
+    def _first_matching_col(tokens: list[str]) -> str | None:
+        # Try compact match by containment.
+        for col in df.columns:
+            col_compact = normalize_header_compact(col)
+            for t in tokens:
+                if t and (t in col_compact):
+                    return str(col)
+        return None
+
+    if "rpm" not in out.columns or out["rpm"].isna().all():
+        c = _first_matching_col(["rpm"])
+        if c is not None:
+            out["rpm"] = df[c]
+
+    if "power" not in out.columns or out["power"].isna().all():
+        c = _first_matching_col(["power", "kw", "watt"])
+        if c is not None:
+            out["power"] = df[c]
+
     # Required canonical derived context.
     out["material_name"] = material_name
 
@@ -105,6 +126,8 @@ def normalize_material_sheet(
         "incident_angle",
         "linear_offset",
         "rotations",
+        "rpm",
+        "power",
         "thickness",
         "rs",
         "rsu",
@@ -127,6 +150,8 @@ def normalize_material_sheet(
         "incident_angle",
         "linear_offset",
         "rotations",
+        "rpm",
+        "power",
         "thickness",
         "rs",
         "rsu",

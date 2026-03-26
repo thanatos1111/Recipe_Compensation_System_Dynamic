@@ -18,3 +18,6 @@ build/
 
 .DS_Store
 Thumbs.db
+
+# User-specific persisted settings (do not commit).
+config/user_config.json
