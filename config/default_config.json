@@ -1,0 +1,100 @@
+{
+  "column_mapping": {
+    "LOT ID": "lot_id",
+    "Date": "date",
+    "Wafer ID": "wafer_id",
+    "KW.H": "lifetime",
+    "Ar": "ar_flow",
+    "O2": "o2_flow",
+    "Incident Angle": "incident_angle",
+    "Linear Offset": "linear_offset",
+    "Rotations": "rotations",
+    "Thickness": "thickness",
+    "RS": "rs",
+    "RSU": "rsu",
+    "Target ID": "target_id"
+  },
+  "spec_settings": {
+    "rs_target": null,
+    "rs_min": null,
+    "rs_max": null,
+    "rs_tol": null,
+    "thickness_target": null,
+    "thickness_min": null,
+    "thickness_max": null,
+    "thickness_tol": null,
+    "rsu_max": 0.0,
+    "use_rs_target_mode": false,
+    "use_thickness_target_mode": false
+  },
+  "parameter_constraints": {
+    "incident_angle": {
+      "type": "continuous",
+      "min_value": 0.0,
+      "max_value": 0.0,
+      "step": 0.0,
+      "allowed_values": null,
+      "is_enabled": true,
+      "is_coupled": false,
+      "coupling_group": null
+    },
+    "linear_offset": {
+      "type": "continuous",
+      "min_value": 0.0,
+      "max_value": 0.0,
+      "step": 0.0,
+      "allowed_values": null,
+      "is_enabled": true,
+      "is_coupled": false,
+      "coupling_group": null
+    },
+    "rotations": {
+      "type": "integer",
+      "min_value": 0,
+      "max_value": 0,
+      "step": 1,
+      "allowed_values": null,
+      "is_enabled": true,
+      "is_coupled": false,
+      "coupling_group": null
+    },
+    "o2_flow": {
+      "type": "continuous",
+      "min_value": 0.0,
+      "max_value": 0.0,
+      "step": 0.0,
+      "allowed_values": null,
+      "is_enabled": true,
+      "is_coupled": true,
+      "coupling_group": "total_flow"
+    },
+    "ar_flow": {
+      "type": "continuous",
+      "min_value": 0.0,
+      "max_value": 0.0,
+      "step": 0.0,
+      "allowed_values": null,
+      "is_enabled": true,
+      "is_coupled": true,
+      "coupling_group": "total_flow"
+    }
+  },
+  "fit_settings": {
+    "method": "windowed_median",
+    "lifetime_bin_count": 10
+  },
+  "model_settings": {
+    "rs_model": "gbr",
+    "thickness_model": "gbr",
+    "rsu_model": "gbr",
+    "enable_classifier": false
+  },
+  "optimizer_weights": {
+    "w_rs": 1.0,
+    "w_thickness": 1.0,
+    "w_rsu": 1.0,
+    "w_move": 0.1,
+    "w_margin": 0.1
+  }
+}
+
