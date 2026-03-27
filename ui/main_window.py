@@ -29,6 +29,7 @@ from ui.model_panel import ModelPanel
 from ui.recommendation_panel import RecommendationPanel
 from ui.update_panel import UpdatePanel
 from ui.settings_dialog import SettingsDialog
+from ui.settings_tabs_dialog import SettingsTabsDialog
 
 
 class MainWindow(QMainWindow):
@@ -68,6 +69,9 @@ class MainWindow(QMainWindow):
 
         self.trend_panel = TrendPanel()
         self.model_panel = ModelPanel()
+        self.recommendation_panel = RecommendationPanel()
+        self.update_panel = UpdatePanel()
+        self.update_panel.refreshRequested.connect(self._refresh_all_panels_from_store)
 
         self._setup_menu()
 
@@ -83,8 +87,8 @@ class MainWindow(QMainWindow):
 
         self.tab_trends_index = self.tabs.addTab(self.trend_panel, "E. Trends")
         self.tab_model_index = self.tabs.addTab(self.model_panel, "F. Model")
-        self.tabs.addTab(RecommendationPanel(), "G. Recommendation")
-        self.tabs.addTab(UpdatePanel(), "H. Update")
+        self.tabs.addTab(self.recommendation_panel, "G. Recommendation")
+        self.tabs.addTab(self.update_panel, "H. Update")
 
         # Ensure plotting refresh when switching back to Trends.
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -93,6 +97,15 @@ class MainWindow(QMainWindow):
 
         central.setLayout(layout)
         self.setCentralWidget(central)
+
+        # Persisted last workbook auto-load + picker default directory.
+        last_path = self.user_config.get("last_workbook_path")
+        if isinstance(last_path, str) and last_path.strip():
+            p = Path(last_path)
+            if p.exists():
+                self.material_selector.set_initial_directory(str(p.parent))
+                # Auto-load to skip manual step A.
+                self._open_workbook(str(p))
 
     def _setup_menu(self) -> None:
         menubar = QMenuBar(self)
@@ -103,6 +116,12 @@ class MainWindow(QMainWindow):
 
         action_constraints = settings_menu.addAction("Edit parameter constraints (JSON)...")
         action_constraints.triggered.connect(self._edit_parameter_constraints)
+
+        action_min_steps = settings_menu.addAction("Minimum parameter steps (JSON)...")
+        action_min_steps.triggered.connect(self._edit_minimum_steps)
+
+        settings_tabs = settings_menu.addAction("Settings (Constraints + Minimum Steps)...")
+        settings_tabs.triggered.connect(self._edit_settings_tabs)
 
     def _edit_parameter_constraints(self) -> None:
         current = self.config.get("parameter_constraints", {})
@@ -116,6 +135,65 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(
             title="Parameter constraints",
             initial_value=current,
+            on_save=on_save,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _edit_minimum_steps(self) -> None:
+        current = self.config.get("minimum_steps", {})
+
+        def on_save(new_min_steps: dict[str, Any]) -> None:
+            self.user_config["minimum_steps"] = new_min_steps
+            save_user_config(self.project_root, self.user_config)
+            self.config = load_effective_config(self.project_root)
+
+            # Refresh panels with the new config.
+            if self._current_material and self._current_target_id:
+                dataset = self.material_manager.get_material(self._current_material)
+                self.trend_panel.set_context(
+                    dataset,
+                    active_target_id=self._current_target_id,
+                    config=self.config,
+                )
+                self.recommendation_panel.set_context(
+                    dataset,
+                    active_target_id=self._current_target_id,
+                    config=self.config,
+                )
+
+        dlg = SettingsDialog(
+            title="Minimum parameter steps",
+            initial_value=current,
+            on_save=on_save,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _edit_settings_tabs(self) -> None:
+        initial_constraints = self.config.get("parameter_constraints", {}) or {}
+        initial_min_steps = self.config.get("minimum_steps", {}) or {}
+
+        def on_save(new_constraints: dict[str, Any], new_min_steps: dict[str, Any]) -> None:
+            self.user_config["parameter_constraints"] = new_constraints
+            self.user_config["minimum_steps"] = new_min_steps
+            save_user_config(self.project_root, self.user_config)
+            self.config = load_effective_config(self.project_root)
+
+            # Refresh panels to reflect updated step constraints.
+            if self._current_material and self._current_target_id:
+                dataset = self.material_manager.get_material(self._current_material)
+                self.trend_panel.set_context(dataset, active_target_id=self._current_target_id, config=self.config)
+                self.recommendation_panel.set_context(
+                    dataset,
+                    active_target_id=self._current_target_id,
+                    config=self.config,
+                )
+
+        dlg = SettingsTabsDialog(
+            title="Settings (Constraints + Minimum Steps)",
+            initial_parameter_constraints=initial_constraints,
+            initial_minimum_steps=initial_min_steps,
             on_save=on_save,
             parent=self,
         )
@@ -182,6 +260,14 @@ class MainWindow(QMainWindow):
         return float(v2) if v2 is not None else None
 
     def _open_workbook(self, workbook_path: str) -> None:
+        # Persist last opened workbook path.
+        if isinstance(workbook_path, str) and workbook_path:
+            self.user_config["last_workbook_path"] = workbook_path
+            save_user_config(self.project_root, self.user_config)
+            p = Path(workbook_path)
+            if p.exists():
+                self.material_selector.set_initial_directory(str(p.parent))
+
         self.material_manager.clear()
         materials = self.material_manager.load_workbook(
             workbook_path,
@@ -234,6 +320,8 @@ class MainWindow(QMainWindow):
         # Ensure the trend panel uses labeled records.
         self.trend_panel.set_context(dataset, active_target_id=target_id, config=self.config)
         self.model_panel.set_context(dataset, active_target_id=target_id, config=self.config)
+        self.recommendation_panel.set_context(dataset, active_target_id=target_id, config=self.config)
+        self.update_panel.set_context(dataset, active_target_id=target_id, config=self.config)
 
     def _on_spec_applied(self, payload: Any) -> None:
         # Payload comes from SpecConfigPanel (spec + persistence options).
@@ -257,6 +345,22 @@ class MainWindow(QMainWindow):
         active_target_id = self._current_target_id
         if active_target_id and active_target_id in dataset.target_instances:
             self.trend_panel.set_context(dataset, active_target_id=active_target_id, config=self.config)
+            self.recommendation_panel.set_context(dataset, active_target_id=active_target_id, config=self.config)
+            self.update_panel.set_context(dataset, active_target_id=active_target_id, config=self.config)
+
+    def _refresh_all_panels_from_store(self) -> None:
+        if not self._current_material or not self._current_target_id:
+            return
+        dataset = self.material_manager.get_material(self._current_material)
+
+        # Ensure derived labels match the current spec.
+        self._apply_spec_and_derived_to_material(dataset)
+
+        self.raw_table_panel.set_material_dataframe(dataset.all_records)
+        self.trend_panel.set_context(dataset, active_target_id=self._current_target_id, config=self.config)
+        self.model_panel.set_context(dataset, active_target_id=self._current_target_id, config=self.config)
+        self.recommendation_panel.set_context(dataset, active_target_id=self._current_target_id, config=self.config)
+        self.update_panel.set_context(dataset, active_target_id=self._current_target_id, config=self.config)
 
         # Persist overrides to user_config.json
         self._persist_spec_and_lifetime_overrides(

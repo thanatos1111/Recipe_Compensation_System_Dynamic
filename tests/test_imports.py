@@ -17,6 +17,7 @@ CORE_MODULES = [
     "core.constraints",
     "core.optimizer",
     "core.safe_band",
+    "core.recommendation_engine",
     "core.update_pipeline",
     "core.exports",
 ]

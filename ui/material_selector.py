@@ -25,6 +25,7 @@ class MaterialSelectorPanel(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._on_open_workbook: Optional[Callable[[str], None]] = None
+        self._initial_directory: str = ""
 
         self.open_button = QPushButton("Open Workbook (.xlsx)")
         self.material_combo = QComboBox()
@@ -55,8 +56,17 @@ class MaterialSelectorPanel(QWidget):
             self.material_combo.setEnabled(False)
         self.material_combo.blockSignals(False)
 
+    def set_initial_directory(self, directory: str) -> None:
+        # Qt expects a directory path; keep empty string for default behavior.
+        self._initial_directory = directory or ""
+
     def _handle_open_clicked(self) -> None:
-        path, _filter = QFileDialog.getOpenFileName(self, "Open Excel Workbook", "", "Excel Files (*.xlsx)")
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Open Excel Workbook",
+            self._initial_directory,
+            "Excel Files (*.xlsx)",
+        )
         if not path:
             return
         if self._on_open_workbook is not None:
@@ -65,8 +75,4 @@ class MaterialSelectorPanel(QWidget):
     def _emit_material_selected(self, material_name: str) -> None:
         if material_name:
             self.materialSelected.emit(material_name)
-
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("Material selector (placeholder)."))
-        self.setLayout(layout)
 

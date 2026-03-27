@@ -138,6 +138,15 @@
     "w_margin": 0.1
   }
   ,
+  "minimum_steps": {
+    "rotations": 1.0,
+    "incident_angle": 0.01,
+    "linear_offset": 0.01,
+    "rpm": 0.01,
+    "power": 0.01,
+    "ar_flow": 0.01,
+    "o2_flow": 0.01
+  },
   "material_overrides": {
     "materials": {}
   }
