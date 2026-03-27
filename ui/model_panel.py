@@ -6,9 +6,11 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import numpy as np
 import pandas as pd
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -20,6 +22,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QSplitter,
+    QSizePolicy,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -30,7 +33,9 @@ from PySide6.QtWidgets import (
 )
 
 from core.evaluation_mode import ScenarioConfig, evaluate_data_sufficiency_scenarios
+from core.feature_engineering import build_feature_matrix, get_feature_schema
 from core.instance_correction import fit_instance_bias, summarize_recent_residuals
+from core.pipeline_inspection import build_processing_view_data
 from core.response_models import train_material_models
 from core.schemas import MaterialDataset
 
@@ -85,6 +90,11 @@ class ModelPanel(QWidget):
         self._eval_thread: Optional[QThread] = None
         self._eval_worker: Optional[_EvalWorker] = None
         self._ordered_target_ids: list[str] = []
+        self._processing_stages: list[dict[str, Any]] = []
+        self._last_training_artifacts: Optional[Any] = None
+        self._training_target_ids: tuple[str, ...] = ()
+        self._model_plot_hover_items: dict[str, list[tuple[Any, float, float, str]]] = {"rs": [], "thickness": [], "rsu": []}
+        self._cutoff_by_target: dict[str, float] = {}
 
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Model and evaluation panel"))
@@ -108,6 +118,19 @@ class ModelPanel(QWidget):
         self.train_button = QPushButton("Train material models (RS/Thickness/RSU)")
         self.train_button.clicked.connect(self._train_clicked)
         training_layout.addWidget(self.train_button)
+        self.train_targets_expand_btn = QToolButton()
+        self.train_targets_expand_btn.setText("Training target selection (default: all)")
+        self.train_targets_expand_btn.setCheckable(True)
+        self.train_targets_expand_btn.setChecked(False)
+        self.train_targets_expand_btn.setArrowType(Qt.ArrowType.RightArrow)
+        self.train_targets_expand_btn.toggled.connect(self._toggle_training_targets_list)
+        training_layout.addWidget(self.train_targets_expand_btn)
+        self.training_targets_list = QListWidget()
+        self.training_targets_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self.training_targets_list.itemSelectionChanged.connect(self._refresh_model_pipeline_view)
+        self.training_targets_list.setVisible(False)
+        self.training_targets_list.setMinimumHeight(110)
+        training_layout.addWidget(self.training_targets_list)
 
         self.output = QTextEdit()
         self.output.setReadOnly(True)
@@ -116,7 +139,142 @@ class ModelPanel(QWidget):
         training_page.setLayout(training_layout)
         self.section_tabs.addTab(training_page, "1) Training")
 
-        # Section 2: scenario evaluation only.
+        # Section 2: model training pipeline introspection.
+        model_pipeline_page = QWidget()
+        model_pipeline_layout = QVBoxLayout()
+        self.model_pipeline_header = QLabel("Training pipeline: input -> feature matrix -> targets -> fit -> evaluation -> confidence")
+        self.model_pipeline_header.setWordWrap(True)
+        self.model_pipeline_header.setMaximumHeight(24)
+        model_pipeline_layout.addWidget(self.model_pipeline_header)
+
+        model_pipeline_split = QSplitter()
+        model_pipeline_split.setOrientation(Qt.Orientation.Horizontal)
+
+        left_panel = QWidget()
+        left_layout = QVBoxLayout()
+        self.model_pipeline_stage_table = QTableWidget()
+        self.model_pipeline_stage_table.setSelectionBehavior(self.model_pipeline_stage_table.SelectionBehavior.SelectRows)
+        self.model_pipeline_stage_table.setSelectionMode(self.model_pipeline_stage_table.SelectionMode.SingleSelection)
+        self.model_pipeline_stage_table.itemSelectionChanged.connect(self._on_model_pipeline_stage_selected)
+        left_layout.addWidget(self.model_pipeline_stage_table)
+        self.model_pipeline_metrics_table = QTableWidget()
+        left_layout.addWidget(self.model_pipeline_metrics_table)
+        left_layout.setStretchFactor(self.model_pipeline_stage_table, 3)
+        left_layout.setStretchFactor(self.model_pipeline_metrics_table, 2)
+        left_panel.setLayout(left_layout)
+        model_pipeline_split.addWidget(left_panel)
+
+        right_model_panel = QWidget()
+        right_model_layout = QVBoxLayout()
+        self.model_pipeline_plot_tabs = QTabWidget()
+        self.model_pipeline_canvases: dict[str, Any] = {}
+        self.model_pipeline_figures: dict[str, Any] = {}
+        self.model_pipeline_axes: dict[str, list[Any]] = {}
+        for resp, title in [("rs", "RS"), ("thickness", "Thickness"), ("rsu", "RSU")]:
+            tab = QWidget()
+            tab_layout = QVBoxLayout()
+            fig = Figure(figsize=(9, 5.4))
+            axes = [
+                fig.add_subplot(231),
+                fig.add_subplot(232),
+                fig.add_subplot(233),
+                fig.add_subplot(234),
+                fig.add_subplot(235),
+                fig.add_subplot(236),
+            ]
+            self.model_pipeline_figures[resp] = fig
+            self.model_pipeline_axes[resp] = axes
+            if FigureCanvas is not None:
+                canvas = FigureCanvas(fig)
+                canvas.setMinimumHeight(300)
+                canvas.setMaximumHeight(430)
+                canvas.mpl_connect("motion_notify_event", lambda event, r=resp: self._on_model_plot_hover(event, r))
+                tab_layout.addWidget(canvas)
+                self.model_pipeline_canvases[resp] = canvas
+            guide = QLabel(
+                "How to read: (1) Stage rows show data kept at each training step. "
+                "(2) Missing ratio highlights weak features. "
+                "(3) Signal plot shows measured response across all targets. "
+                "(4) Parity closer to diagonal is better. "
+                "(5) Residuals centered near 0 indicate lower bias. "
+                "(6) Feature influence ranks important features."
+            )
+            guide.setWordWrap(True)
+            guide.setMaximumHeight(42)
+            tab_layout.addWidget(guide)
+            tab.setLayout(tab_layout)
+            self.model_pipeline_plot_tabs.addTab(tab, title)
+        right_model_layout.addWidget(self.model_pipeline_plot_tabs)
+
+        self.model_pipeline_stage_details = QTextEdit()
+        self.model_pipeline_stage_details.setReadOnly(True)
+        right_model_layout.addWidget(self.model_pipeline_stage_details)
+        right_model_layout.setStretchFactor(self.model_pipeline_plot_tabs, 4)
+        right_model_layout.setStretchFactor(self.model_pipeline_stage_details, 2)
+        right_model_panel.setLayout(right_model_layout)
+        model_pipeline_split.addWidget(right_model_panel)
+        model_pipeline_split.setSizes([420, 700])
+        model_pipeline_layout.addWidget(model_pipeline_split)
+        model_pipeline_page.setLayout(model_pipeline_layout)
+        self.section_tabs.addTab(model_pipeline_page, "2) Model Pipeline")
+
+        # Section 3: data processing view (read-only).
+        processing_page = QWidget()
+        processing_layout = QVBoxLayout()
+        self.pipeline_diagram_label = QLabel(
+            "Pipeline: raw -> normalized -> grouped targets -> derived columns -> in-spec labels -> trend rows -> training rows -> excluded rows"
+        )
+        self.pipeline_diagram_label.setWordWrap(True)
+        self.pipeline_diagram_label.setMaximumHeight(28)
+        processing_layout.addWidget(self.pipeline_diagram_label)
+
+        self.feature_list_label = QLabel("Features: -")
+        self.feature_list_label.setWordWrap(True)
+        self.feature_list_label.setMaximumHeight(42)
+        processing_layout.addWidget(self.feature_list_label)
+
+        self.processing_split = QSplitter()
+        self.processing_split.setOrientation(Qt.Orientation.Horizontal)
+        self.processing_split.setChildrenCollapsible(False)
+
+        self.stage_summary_table = QTableWidget()
+        self.stage_summary_table.setMinimumWidth(320)
+        self.stage_summary_table.setMinimumHeight(0)
+        self.stage_summary_table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+        self.stage_summary_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.stage_summary_table.setVerticalScrollMode(self.stage_summary_table.ScrollMode.ScrollPerPixel)
+        self.stage_summary_table.setSelectionBehavior(self.stage_summary_table.SelectionBehavior.SelectRows)
+        self.stage_summary_table.setSelectionMode(self.stage_summary_table.SelectionMode.SingleSelection)
+        self.stage_summary_table.itemSelectionChanged.connect(self._on_stage_selection_changed)
+        processing_split_header = self.stage_summary_table.horizontalHeader()
+        processing_split_header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.processing_split.addWidget(self.stage_summary_table)
+
+        right_wrap = QWidget()
+        right_layout = QVBoxLayout()
+        self.stage_preview_title = QLabel("Preview: -")
+        right_layout.addWidget(self.stage_preview_title)
+        self.stage_preview_table = QTableWidget()
+        self.stage_preview_table.setMinimumHeight(0)
+        self.stage_preview_table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+        self.stage_preview_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.stage_preview_table.setVerticalScrollMode(self.stage_preview_table.ScrollMode.ScrollPerPixel)
+        self.stage_preview_table.setWordWrap(False)
+        self.stage_preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.stage_preview_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        right_layout.addWidget(self.stage_preview_table)
+        right_layout.setStretchFactor(self.stage_preview_table, 1)
+        right_wrap.setLayout(right_layout)
+        self.processing_split.addWidget(right_wrap)
+        self.processing_split.setSizes([430, 650])
+        self.processing_split.setStretchFactor(0, 2)
+        self.processing_split.setStretchFactor(1, 3)
+        processing_layout.addWidget(self.processing_split)
+        processing_layout.setStretchFactor(self.processing_split, 1)
+        processing_page.setLayout(processing_layout)
+        self.section_tabs.addTab(processing_page, "3) Data Processing View")
+
+        # Section 4: scenario evaluation only.
         eval_page = QWidget()
         eval_layout = QVBoxLayout()
 
@@ -136,7 +294,9 @@ class ModelPanel(QWidget):
         self.cutoff_spin = QDoubleSpinBox()
         self.cutoff_spin.setRange(0.0, 1e9)
         self.cutoff_spin.setDecimals(6)
+        self.cutoff_spin.setKeyboardTracking(False)
         self.cutoff_spin.setValue(0.0)
+        self.cutoff_spin.editingFinished.connect(self._on_cutoff_edit_finished)
         cutoff_row.addWidget(self.cutoff_spin)
         cutoff_row.addStretch(1)
         eval_context_form.addRow(cutoff_row)
@@ -228,7 +388,7 @@ class ModelPanel(QWidget):
         self.main_splitter.setSizes([340, 180])
         eval_layout.addWidget(self.main_splitter)
         eval_page.setLayout(eval_layout)
-        self.section_tabs.addTab(eval_page, "2) Scenario Evaluation")
+        self.section_tabs.addTab(eval_page, "4) Scenario Evaluation")
 
         self.setLayout(layout)
 
@@ -241,9 +401,13 @@ class ModelPanel(QWidget):
         self._ordered_target_ids = target_ids
         self.training_active_target_label.setText(active_target_id)
         self._set_combo_items(self.eval_active_target_combo, target_ids, active_target_id)
+        self._set_target_list_items(self.training_targets_list, target_ids)
+        self._select_all_in_list(self.training_targets_list)
         self._refresh_history_target_lists(active_target_id)
         self._init_cutoff(material_dataset, active_target_id)
         self._refresh_history_selection_enabled_state()
+        self._refresh_processing_view()
+        self._refresh_model_pipeline_view()
 
     def _train_clicked(self) -> None:
         if self._material_dataset is None:
@@ -254,9 +418,19 @@ class ModelPanel(QWidget):
         if df is None or df.empty:
             self.output.setPlainText("No rows available for training.")
             return
+        selected_targets = self._selected_targets_from_widget(self.training_targets_list)
+        if selected_targets:
+            train_df = df[df["target_id"].astype(str).isin(selected_targets)].copy()
+        else:
+            train_df = df.copy()
+        if train_df.empty:
+            self.output.setPlainText("No rows left after selected training targets filter.")
+            return
 
         # Train per-material models using all rows (including out-of-spec).
-        artifacts = train_material_models(df, config=self._config)
+        artifacts = train_material_models(train_df, config=self._config)
+        self._last_training_artifacts = artifacts
+        self._training_target_ids = tuple(selected_targets) if selected_targets else tuple(self._ordered_target_ids)
         self._material_dataset.material_model_artifacts = artifacts
 
         # Fit active-instance correction if possible.
@@ -278,6 +452,7 @@ class ModelPanel(QWidget):
             "Training summary:\n"
             f"- material: {self._material_dataset.material_name}\n"
             f"- rows: {artifacts.train_summary.get('row_count')}\n"
+            f"- selected_training_targets: {list(self._training_target_ids)}\n"
             f"- target_instances: {artifacts.train_summary.get('target_instance_count')}\n"
             "\nMetrics (time-aware holdout):\n"
             f"- rs_mae: {artifacts.metrics.get('rs_mae')}\n"
@@ -288,6 +463,7 @@ class ModelPanel(QWidget):
             f"- notes: {artifacts.confidence_summary.get('notes')}\n"
             f"{correction_text}"
         )
+        self._refresh_model_pipeline_view()
 
     def _set_combo_items(self, combo: QComboBox, items: list[str], selected: str) -> None:
         combo.blockSignals(True)
@@ -336,12 +512,451 @@ class ModelPanel(QWidget):
     def _selected_targets_from_widget(self, widget: QListWidget) -> list[str]:
         return [item.text() for item in widget.selectedItems()]
 
+    def _select_all_in_list(self, widget: QListWidget) -> None:
+        for i in range(widget.count()):
+            widget.item(i).setSelected(True)
+
+    def _toggle_training_targets_list(self, expanded: bool) -> None:
+        self.training_targets_list.setVisible(expanded)
+        self.train_targets_expand_btn.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+
+    def _on_cutoff_edit_finished(self) -> None:
+        self.cutoff_spin.interpretText()
+        active_target_id = self.eval_active_target_combo.currentText().strip()
+        if active_target_id:
+            self._cutoff_by_target[active_target_id] = float(self.cutoff_spin.value())
+
     def _on_active_target_changed(self, target_id: str) -> None:
         if self._material_dataset is None:
             return
         self.training_active_target_label.setText(target_id)
         self._refresh_history_target_lists(target_id)
         self._init_cutoff(self._material_dataset, target_id)
+        self._refresh_processing_view()
+        self._refresh_model_pipeline_view()
+
+    def _refresh_model_pipeline_view(self) -> None:
+        if self._material_dataset is None:
+            return
+        df_all = self._material_dataset.all_records
+        selected_targets = self._selected_targets_from_widget(self.training_targets_list)
+        if df_all is not None and not df_all.empty and selected_targets:
+            df = df_all[df_all["target_id"].astype(str).isin(selected_targets)].copy()
+        else:
+            df = df_all
+        if df is None or df.empty:
+            self.model_pipeline_stage_table.setRowCount(0)
+            self.model_pipeline_metrics_table.setRowCount(0)
+            self.model_pipeline_metrics_table.setColumnCount(0)
+            self.model_pipeline_stage_details.setPlainText("No rows available.")
+            return
+
+        feature_config = self._config.get("feature_config", {})
+        schema = get_feature_schema(feature_config)
+        X = build_feature_matrix(df, feature_config)
+        rs_valid = int(pd.to_numeric(df.get("rs"), errors="coerce").notna().sum()) if "rs" in df.columns else 0
+        thickness_valid = int(pd.to_numeric(df.get("thickness"), errors="coerce").notna().sum()) if "thickness" in df.columns else 0
+        rsu_valid = int(pd.to_numeric(df.get("rsu"), errors="coerce").notna().sum()) if "rsu" in df.columns else 0
+        trained = self._last_training_artifacts is not None
+
+        stage_rows = [
+            ("Input rows", "ready", f"rows={len(df)}; targets={df['target_id'].nunique() if 'target_id' in df.columns else 0}"),
+            ("Feature matrix", "ready", f"rows={len(X)}; cols={len(X.columns)}"),
+            ("Target extraction", "ready", f"rs={rs_valid}, thickness={thickness_valid}, rsu={rsu_valid}"),
+            ("Model fitting", "trained" if trained else "pending", "train_button required"),
+            ("Time-aware evaluation", "trained" if trained else "pending", "metrics available after training"),
+            ("Confidence synthesis", "trained" if trained else "pending", "summary available after training"),
+        ]
+        self._render_model_pipeline_stages(stage_rows)
+        self._render_model_pipeline_metrics(schema)
+        self._render_model_pipeline_plots(df, X)
+        if stage_rows:
+            self.model_pipeline_stage_table.selectRow(0)
+
+    def _render_model_pipeline_stages(self, rows: list[tuple[str, str, str]]) -> None:
+        self.model_pipeline_stage_table.clear()
+        self.model_pipeline_stage_table.setRowCount(len(rows))
+        self.model_pipeline_stage_table.setColumnCount(3)
+        headers = ["Stage", "Status", "Notes"]
+        for ci, h in enumerate(headers):
+            self.model_pipeline_stage_table.setHorizontalHeaderItem(ci, QTableWidgetItem(h))
+        for ri, (name, status, notes) in enumerate(rows):
+            self.model_pipeline_stage_table.setItem(ri, 0, QTableWidgetItem(name))
+            self.model_pipeline_stage_table.setItem(ri, 1, QTableWidgetItem(status))
+            self.model_pipeline_stage_table.setItem(ri, 2, QTableWidgetItem(notes))
+        self.model_pipeline_stage_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+
+    def _render_model_pipeline_metrics(self, schema: Any) -> None:
+        self.model_pipeline_metrics_table.clear()
+        metrics_rows: list[tuple[str, str]] = []
+        metrics_rows.append(("numeric_features", ", ".join(schema.numeric_features)))
+        metrics_rows.append(("categorical_features", ", ".join(schema.categorical_features)))
+        if self._last_training_artifacts is not None:
+            artifacts = self._last_training_artifacts
+            for k, v in (artifacts.train_summary or {}).items():
+                metrics_rows.append((f"train_summary.{k}", str(v)))
+            for k, v in (artifacts.metrics or {}).items():
+                metrics_rows.append((f"metrics.{k}", str(v)))
+            for k, v in (artifacts.confidence_summary or {}).items():
+                metrics_rows.append((f"confidence.{k}", str(v)))
+        else:
+            metrics_rows.append(("status", "Train models to populate internal metrics."))
+
+        self.model_pipeline_metrics_table.setRowCount(len(metrics_rows))
+        self.model_pipeline_metrics_table.setColumnCount(2)
+        self.model_pipeline_metrics_table.setHorizontalHeaderItem(0, QTableWidgetItem("Key"))
+        self.model_pipeline_metrics_table.setHorizontalHeaderItem(1, QTableWidgetItem("Value"))
+        for ri, (k, v) in enumerate(metrics_rows):
+            self.model_pipeline_metrics_table.setItem(ri, 0, QTableWidgetItem(k))
+            self.model_pipeline_metrics_table.setItem(ri, 1, QTableWidgetItem(v))
+        self.model_pipeline_metrics_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+
+    def _on_model_pipeline_stage_selected(self) -> None:
+        selected = self.model_pipeline_stage_table.selectedItems()
+        if not selected:
+            return
+        row = selected[0].row()
+        stage_name_item = self.model_pipeline_stage_table.item(row, 0)
+        status_item = self.model_pipeline_stage_table.item(row, 1)
+        note_item = self.model_pipeline_stage_table.item(row, 2)
+        stage_name = stage_name_item.text() if stage_name_item is not None else "-"
+        status = status_item.text() if status_item is not None else "-"
+        note = note_item.text() if note_item is not None else "-"
+        self.model_pipeline_stage_details.setPlainText(
+            f"Stage: {stage_name}\nStatus: {status}\n\nDetails:\n{note}\n\n"
+            "This view is read-only and intended for understanding how the training pipeline is assembled."
+        )
+
+    def _render_model_pipeline_plots(self, df: pd.DataFrame, X: pd.DataFrame) -> None:
+        for resp in ["rs", "thickness", "rsu"]:
+            canvas = self.model_pipeline_canvases.get(resp)
+            if canvas is None:
+                continue
+            axes = self.model_pipeline_axes[resp]
+            self._model_plot_hover_items[resp] = []
+            for ax in axes:
+                ax.clear()
+                ax.set_axis_on()
+
+            self._draw_response_pipeline_plots(resp, df, X, axes)
+            self.model_pipeline_figures[resp].tight_layout()
+            canvas.draw_idle()
+
+    def _draw_response_pipeline_plots(self, response: str, df: pd.DataFrame, X: pd.DataFrame, axes: list[Any]) -> None:
+        target_col = response
+        model_key = f"{response}_model" if response != "thickness" else "thickness_model"
+        label = "RS" if response == "rs" else ("Thickness" if response == "thickness" else "RSU")
+
+        # Plot 1: pipeline stage row counts.
+        ax = axes[0]
+        stage_names = ["input", "features", "rs_valid", "thk_valid", "rsu_valid"]
+        rs_valid = int(pd.to_numeric(df.get("rs"), errors="coerce").notna().sum()) if "rs" in df.columns else 0
+        th_valid = int(pd.to_numeric(df.get("thickness"), errors="coerce").notna().sum()) if "thickness" in df.columns else 0
+        rsu_valid = int(pd.to_numeric(df.get("rsu"), errors="coerce").notna().sum()) if "rsu" in df.columns else 0
+        vals = [len(df), len(X), rs_valid, th_valid, rsu_valid]
+        bars = ax.bar(stage_names, vals, color=["#4c78a8", "#59a14f", "#f28e2b", "#e15759", "#76b7b2"])
+        ax.set_title(f"1) Stage rows ({label})", fontsize=9)
+        ax.tick_params(axis="x", labelrotation=25, labelsize=7)
+        ax.tick_params(axis="y", labelsize=7)
+        ax.grid(True, alpha=0.2, axis="y")
+        for i, b in enumerate(bars):
+            self._add_hover_item(response, ax, float(i), float(vals[i]), f"{stage_names[i]}: {vals[i]}")
+
+        # Plot 2: feature matrix missing ratio.
+        ax = axes[1]
+        if not X.empty:
+            missing_ratio = X.isna().mean().sort_values(ascending=False).head(10)
+            if len(missing_ratio) > 0:
+                names = [str(c) for c in missing_ratio.index]
+                vals_m = [float(v) for v in missing_ratio.values]
+                y_pos = list(range(len(names)))
+                ax.barh(y_pos, vals_m, color="#f28e2b")
+                ax.set_yticks(y_pos)
+                ax.set_yticklabels(names)
+                ax.invert_yaxis()
+                ax.set_xlim(0, 1)
+                ax.set_title("2) Feature missing ratio", fontsize=9)
+                ax.tick_params(labelsize=7)
+                ax.grid(True, alpha=0.2, axis="x")
+                for i, v in enumerate(vals_m):
+                    self._add_hover_item(response, ax, float(v), float(i), f"{names[i]} missing={v:.3f}")
+            else:
+                ax.text(0.5, 0.5, "No features", ha="center", va="center", fontsize=8, transform=ax.transAxes)
+                ax.set_axis_off()
+        else:
+            ax.text(0.5, 0.5, "No feature matrix", ha="center", va="center", fontsize=8, transform=ax.transAxes)
+            ax.set_axis_off()
+
+        # Plot 3: all-target response signal.
+        ax = axes[2]
+        if "target_id" in df.columns and "lifetime" in df.columns and target_col in df.columns:
+            plot_df = df.copy()
+            plot_df["target_id"] = plot_df["target_id"].astype(str)
+            target_order = sorted(plot_df["target_id"].dropna().unique().tolist())
+            for tid in target_order[:8]:
+                sub = plot_df[plot_df["target_id"] == tid].sort_values("lifetime")
+                x = pd.to_numeric(sub["lifetime"], errors="coerce")
+                y = pd.to_numeric(sub[target_col], errors="coerce")
+                valid = x.notna() & y.notna()
+                x = x[valid]
+                y = y[valid]
+                if len(x) == 0:
+                    continue
+                ax.plot(x, y, marker="o", linewidth=1.0, markersize=2.0, label=tid)
+                for xv, yv in zip(x.head(40), y.head(40)):
+                    self._add_hover_item(response, ax, float(xv), float(yv), f"{tid}: lifetime={xv:.4g}, {label}={yv:.4g}")
+            ax.set_title(f"3) All-target {label} signal", fontsize=9)
+            ax.set_xlabel("lifetime", fontsize=8)
+            ax.set_ylabel(label, fontsize=8)
+            ax.tick_params(labelsize=7)
+            ax.grid(True, alpha=0.2)
+            if len(target_order) > 0:
+                ax.legend(fontsize=6, loc="best")
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                f"No {label} trend available",
+                ha="center",
+                va="center",
+                fontsize=8,
+                transform=ax.transAxes,
+            )
+            ax.set_axis_off()
+
+        # Plot 4/5/6: fitting internals (if trained).
+        ax_parity = axes[3]
+        ax_resid = axes[4]
+        ax_imp = axes[5]
+
+        model_obj = getattr(self._last_training_artifacts, model_key, None) if self._last_training_artifacts is not None else None
+        if model_obj is None or target_col not in df.columns:
+            for a, title in [
+                (ax_parity, f"4) {label} parity"),
+                (ax_resid, f"5) {label} residuals"),
+                (ax_imp, f"6) {label} feature influence"),
+            ]:
+                a.text(0.5, 0.5, "Train model to view", ha="center", va="center", fontsize=8, transform=a.transAxes)
+                a.set_title(title, fontsize=9)
+                a.set_axis_off()
+            return
+
+        y = pd.to_numeric(df[target_col], errors="coerce")
+        valid = y.notna()
+        if int(valid.sum()) == 0:
+            for a, title in [
+                (ax_parity, f"4) {label} parity"),
+                (ax_resid, f"5) {label} residuals"),
+                (ax_imp, f"6) {label} feature influence"),
+            ]:
+                a.text(0.5, 0.5, f"No valid {label} targets", ha="center", va="center", fontsize=8, transform=a.transAxes)
+                a.set_title(title, fontsize=9)
+                a.set_axis_off()
+            return
+
+        X_valid = X.loc[valid]
+        y_valid = y.loc[valid]
+        try:
+            y_pred = pd.Series(np.asarray(model_obj.predict(X_valid), dtype=float), index=y_valid.index)
+        except Exception:
+            y_pred = pd.Series(dtype=float)
+
+        if y_pred.empty:
+            for a, title in [
+                (ax_parity, f"4) {label} parity"),
+                (ax_resid, f"5) {label} residuals"),
+                (ax_imp, f"6) {label} feature influence"),
+            ]:
+                a.text(0.5, 0.5, "Prediction unavailable", ha="center", va="center", fontsize=8, transform=a.transAxes)
+                a.set_title(title, fontsize=9)
+                a.set_axis_off()
+            return
+
+        # Plot 4 parity.
+        idx = y_valid.index
+        if len(idx) > 450:
+            idx = y_valid.sample(n=450, random_state=0).index
+        y_s = y_valid.loc[idx]
+        p_s = y_pred.loc[idx]
+        ax_parity.scatter(y_s, p_s, s=9, alpha=0.6, color="#59a14f")
+        lo = float(min(y_s.min(), p_s.min()))
+        hi = float(max(y_s.max(), p_s.max()))
+        ax_parity.plot([lo, hi], [lo, hi], linestyle="--", color="#888888", linewidth=1)
+        ax_parity.set_title(f"4) {label} parity (actual vs pred)", fontsize=9)
+        ax_parity.set_xlabel("actual", fontsize=8)
+        ax_parity.set_ylabel("pred", fontsize=8)
+        ax_parity.tick_params(labelsize=7)
+        ax_parity.grid(True, alpha=0.2)
+        for xv, yv in zip(y_s.head(70), p_s.head(70)):
+            self._add_hover_item(response, ax_parity, float(xv), float(yv), f"actual={xv:.4g}, pred={yv:.4g}")
+
+        # Plot 5 residual histogram.
+        resid = (y_valid - y_pred).dropna()
+        ax_resid.hist(resid, bins=24, color="#e15759", alpha=0.8)
+        ax_resid.axvline(0.0, color="#555555", linestyle="--", linewidth=1)
+        ax_resid.set_title(f"5) {label} residual distribution", fontsize=9)
+        ax_resid.set_xlabel("actual - pred", fontsize=8)
+        ax_resid.tick_params(labelsize=7)
+        ax_resid.grid(True, alpha=0.2, axis="y")
+
+        # Plot 6 feature influence.
+        plotted = False
+        try:
+            if hasattr(model_obj, "named_steps"):
+                pre = model_obj.named_steps.get("preprocess")
+                est = model_obj.named_steps.get("model")
+                feat_names = list(pre.get_feature_names_out()) if pre is not None else list(X.columns)
+                if hasattr(est, "feature_importances_"):
+                    imp = np.asarray(est.feature_importances_, dtype=float)
+                    if len(imp) == len(feat_names) and len(imp) > 0:
+                        order = np.argsort(imp)[::-1][:10]
+                        names = [feat_names[i] for i in order][::-1]
+                        vals = [float(imp[i]) for i in order][::-1]
+                        ax_imp.barh(names, vals, color="#76b7b2")
+                        ax_imp.set_title(f"6) {label} top feature importances", fontsize=9)
+                        ax_imp.tick_params(labelsize=7)
+                        ax_imp.grid(True, alpha=0.2, axis="x")
+                        plotted = True
+                elif hasattr(est, "coef_"):
+                    coef = np.ravel(np.asarray(est.coef_, dtype=float))
+                    if len(coef) == len(feat_names) and len(coef) > 0:
+                        abs_coef = np.abs(coef)
+                        order = np.argsort(abs_coef)[::-1][:10]
+                        names = [feat_names[i] for i in order][::-1]
+                        vals = [float(abs_coef[i]) for i in order][::-1]
+                        ax_imp.barh(names, vals, color="#76b7b2")
+                        ax_imp.set_title(f"6) {label} top |coefficients|", fontsize=9)
+                        ax_imp.tick_params(labelsize=7)
+                        ax_imp.grid(True, alpha=0.2, axis="x")
+                        plotted = True
+        except Exception:
+            plotted = False
+
+        if not plotted:
+            ax_imp.text(0.5, 0.5, "Feature influence unavailable", ha="center", va="center", fontsize=8, transform=ax_imp.transAxes)
+            ax_imp.set_title(f"6) {label} feature influence", fontsize=9)
+            ax_imp.set_axis_off()
+
+    def _add_hover_item(self, response: str, ax: Any, x: float, y: float, text: str) -> None:
+        self._model_plot_hover_items.setdefault(response, []).append((ax, x, y, text))
+
+    def _on_model_plot_hover(self, event: Any, response: str) -> None:
+        canvas = self.model_pipeline_canvases.get(response)
+        fig = self.model_pipeline_figures.get(response)
+        if canvas is None or fig is None:
+            return
+        if event.inaxes is None or event.x is None or event.y is None:
+            if hasattr(canvas, "_hover_annot") and canvas._hover_annot is not None:
+                canvas._hover_annot.set_visible(False)
+                canvas.draw_idle()
+            return
+
+        if not hasattr(canvas, "_hover_annot") or canvas._hover_annot is None:
+            canvas._hover_annot = event.inaxes.annotate(
+                "",
+                xy=(0, 0),
+                xytext=(10, 10),
+                textcoords="offset points",
+                bbox=dict(boxstyle="round", fc="w", alpha=0.9),
+                fontsize=7,
+            )
+            canvas._hover_annot.set_visible(False)
+
+        annot = canvas._hover_annot
+        best = None
+        best_dist = 14.0
+        for ax, x, y, text in self._model_plot_hover_items.get(response, []):
+            if ax is not event.inaxes:
+                continue
+            px, py = ax.transData.transform((x, y))
+            dist = float(np.hypot(px - event.x, py - event.y))
+            if dist < best_dist:
+                best_dist = dist
+                best = (x, y, text)
+        if best is None:
+            if annot.get_visible():
+                annot.set_visible(False)
+                canvas.draw_idle()
+            return
+        bx, by, bt = best
+        annot.xy = (bx, by)
+        annot.set_text(bt)
+        annot.set_visible(True)
+        canvas.draw_idle()
+
+    def _refresh_processing_view(self) -> None:
+        if self._material_dataset is None:
+            return
+        active_target_id = self.eval_active_target_combo.currentText().strip()
+        if not active_target_id:
+            return
+        payload = build_processing_view_data(
+            material_dataset=self._material_dataset,
+            active_target_id=active_target_id,
+            config=self._config,
+        )
+        self._processing_stages = list(payload.get("stages", []))
+        feature_list = payload.get("feature_list", [])
+        self.feature_list_label.setText("Features: " + (", ".join(str(v) for v in feature_list) if feature_list else "-"))
+        self._render_stage_summary_table()
+        if self._processing_stages:
+            self.stage_summary_table.selectRow(0)
+
+    def _render_stage_summary_table(self) -> None:
+        self.stage_summary_table.clear()
+        headers = ["Stage", "Rows", "Missing", "In-spec", "Targets"]
+        self.stage_summary_table.setColumnCount(len(headers))
+        self.stage_summary_table.setRowCount(len(self._processing_stages))
+        for ci, h in enumerate(headers):
+            self.stage_summary_table.setHorizontalHeaderItem(ci, QTableWidgetItem(h))
+        for ri, stage in enumerate(self._processing_stages):
+            summary = stage.get("summary", {})
+            self.stage_summary_table.setItem(ri, 0, QTableWidgetItem(str(stage.get("name", ""))))
+            self.stage_summary_table.setItem(ri, 1, QTableWidgetItem(str(summary.get("row_count", 0))))
+            self.stage_summary_table.setItem(ri, 2, QTableWidgetItem(str(summary.get("missing_values", 0))))
+            self.stage_summary_table.setItem(ri, 3, QTableWidgetItem(str(summary.get("in_spec_count", 0))))
+            self.stage_summary_table.setItem(ri, 4, QTableWidgetItem(str(summary.get("target_instance_count", 0))))
+        vh = self.stage_summary_table.verticalHeader()
+        vh.setDefaultSectionSize(24)
+        vh.setMinimumSectionSize(20)
+
+    def _on_stage_selection_changed(self) -> None:
+        selected = self.stage_summary_table.selectedItems()
+        if not selected:
+            return
+        row = selected[0].row()
+        if row < 0 or row >= len(self._processing_stages):
+            return
+        stage = self._processing_stages[row]
+        self._render_stage_preview(stage)
+
+    def _render_stage_preview(self, stage: dict[str, Any]) -> None:
+        name = str(stage.get("name", "-"))
+        summary = stage.get("summary", {})
+        self.stage_preview_title.setText(
+            f"Preview: {name} | rows={summary.get('row_count', 0)} | missing={summary.get('missing_values', 0)}"
+        )
+        df = stage.get("df")
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            self.stage_preview_table.setRowCount(0)
+            self.stage_preview_table.setColumnCount(0)
+            return
+        show = df.head(40)
+        cols = list(show.columns)
+        self.stage_preview_table.clear()
+        self.stage_preview_table.setRowCount(len(show))
+        self.stage_preview_table.setColumnCount(len(cols))
+        for ci, col_name in enumerate(cols):
+            self.stage_preview_table.setHorizontalHeaderItem(ci, QTableWidgetItem(str(col_name)))
+        for ri in range(len(show)):
+            for ci, col_name in enumerate(cols):
+                v = show.iloc[ri][col_name]
+                txt = "" if pd.isna(v) else str(v)
+                self.stage_preview_table.setItem(ri, ci, QTableWidgetItem(txt))
+        vh = self.stage_preview_table.verticalHeader()
+        vh.setDefaultSectionSize(22)
+        vh.setMinimumSectionSize(20)
+        vh.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
 
     def _refresh_history_target_lists(self, active_target_id: str) -> None:
         prior_targets = self._prior_target_ids_for_active(active_target_id)
@@ -363,9 +978,18 @@ class ModelPanel(QWidget):
         lifetimes = pd.to_numeric(inst.records["lifetime"], errors="coerce").dropna()
         if lifetimes.empty:
             return
-        self.cutoff_spin.setMinimum(float(lifetimes.min()))
-        self.cutoff_spin.setMaximum(float(lifetimes.max()))
-        self.cutoff_spin.setValue(float(lifetimes.quantile(0.5)))
+        min_v = float(lifetimes.min())
+        max_v = float(lifetimes.max())
+        self.cutoff_spin.blockSignals(True)
+        self.cutoff_spin.setMinimum(min_v)
+        self.cutoff_spin.setMaximum(max_v)
+        if target_id in self._cutoff_by_target:
+            self.cutoff_spin.setValue(float(min(max(self._cutoff_by_target[target_id], min_v), max_v)))
+        else:
+            default_v = float(lifetimes.quantile(0.5))
+            self.cutoff_spin.setValue(default_v)
+            self._cutoff_by_target[target_id] = default_v
+        self.cutoff_spin.blockSignals(False)
 
     def _evaluate_clicked(self) -> None:
         if self._material_dataset is None:
