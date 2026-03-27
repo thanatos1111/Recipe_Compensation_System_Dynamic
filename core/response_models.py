@@ -140,9 +140,12 @@ def evaluate_models_time_aware(
 
     work = df.copy()
     if "target_id" in work.columns and "lifetime" in work.columns:
-        work = work.sort_values(["target_id", "lifetime"]).reset_index(drop=True)
+        # Keep original row index so we can align with X (built from the same df),
+        # even when df is a filtered subset with non-consecutive index labels.
+        work = work.sort_values(["target_id", "lifetime"])
     elif "lifetime" in work.columns:
-        work = work.sort_values(["lifetime"]).reset_index(drop=True)
+        # Keep original row index for safe X alignment.
+        work = work.sort_values(["lifetime"])
 
     n = len(work)
     split = int(np.floor((1.0 - test_fraction) * n))

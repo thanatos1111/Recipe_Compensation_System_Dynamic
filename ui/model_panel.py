@@ -166,6 +166,8 @@ class ModelPanel(QWidget):
 
         right_model_panel = QWidget()
         right_model_layout = QVBoxLayout()
+        self.model_pipeline_plot_mode_tabs = QTabWidget()
+
         self.model_pipeline_plot_tabs = QTabWidget()
         self.model_pipeline_canvases: dict[str, Any] = {}
         self.model_pipeline_figures: dict[str, Any] = {}
@@ -204,12 +206,39 @@ class ModelPanel(QWidget):
             tab_layout.addWidget(guide)
             tab.setLayout(tab_layout)
             self.model_pipeline_plot_tabs.addTab(tab, title)
-        right_model_layout.addWidget(self.model_pipeline_plot_tabs)
+        self.model_pipeline_plot_mode_tabs.addTab(self.model_pipeline_plot_tabs, "By Response")
+
+        self.model_stage_plot_tabs = QTabWidget()
+        self.model_stage_figures: dict[str, Any] = {}
+        self.model_stage_canvases: dict[str, Any] = {}
+        self.model_stage_axes: dict[str, Any] = {}
+        for stage_key, stage_title in [
+            ("feature_matrix", "Feature Matrix"),
+            ("target_extraction", "Target Extraction"),
+            ("model_fitting", "Model Fitting"),
+            ("time_aware_eval", "Time-Aware Eval"),
+            ("confidence", "Confidence Synthesis"),
+        ]:
+            tab = QWidget()
+            tab_layout = QVBoxLayout()
+            fig = Figure(figsize=(8.8, 4.4))
+            ax = fig.add_subplot(111)
+            self.model_stage_figures[stage_key] = fig
+            self.model_stage_axes[stage_key] = ax
+            if FigureCanvas is not None:
+                canvas = FigureCanvas(fig)
+                canvas.setMinimumHeight(280)
+                tab_layout.addWidget(canvas)
+                self.model_stage_canvases[stage_key] = canvas
+            tab.setLayout(tab_layout)
+            self.model_stage_plot_tabs.addTab(tab, stage_title)
+        self.model_pipeline_plot_mode_tabs.addTab(self.model_stage_plot_tabs, "By Stage")
+        right_model_layout.addWidget(self.model_pipeline_plot_mode_tabs)
 
         self.model_pipeline_stage_details = QTextEdit()
         self.model_pipeline_stage_details.setReadOnly(True)
         right_model_layout.addWidget(self.model_pipeline_stage_details)
-        right_model_layout.setStretchFactor(self.model_pipeline_plot_tabs, 4)
+        right_model_layout.setStretchFactor(self.model_pipeline_plot_mode_tabs, 4)
         right_model_layout.setStretchFactor(self.model_pipeline_stage_details, 2)
         right_model_panel.setLayout(right_model_layout)
         model_pipeline_split.addWidget(right_model_panel)
@@ -640,6 +669,111 @@ class ModelPanel(QWidget):
 
             self._draw_response_pipeline_plots(resp, df, X, axes)
             self.model_pipeline_figures[resp].tight_layout()
+            canvas.draw_idle()
+        self._render_stage_pipeline_plots(df, X)
+
+    def _render_stage_pipeline_plots(self, df: pd.DataFrame, X: pd.DataFrame) -> None:
+        # 1) Feature matrix diagnostics.
+        ax = self.model_stage_axes.get("feature_matrix")
+        canvas = self.model_stage_canvases.get("feature_matrix")
+        if ax is not None and canvas is not None:
+            ax.clear()
+            if X is None or X.empty:
+                ax.text(0.5, 0.5, "No feature matrix", ha="center", va="center", transform=ax.transAxes)
+                ax.set_axis_off()
+            else:
+                miss = X.isna().mean().sort_values(ascending=False).head(15)
+                ax.barh(list(reversed([str(v) for v in miss.index])), list(reversed([float(v) for v in miss.values])), color="#f28e2b")
+                ax.set_xlim(0, 1)
+                ax.set_title("Feature missing ratio (top 15)")
+                ax.set_xlabel("missing ratio")
+                ax.grid(True, alpha=0.2, axis="x")
+            self.model_stage_figures["feature_matrix"].tight_layout()
+            canvas.draw_idle()
+
+        # 2) Target extraction diagnostics.
+        ax = self.model_stage_axes.get("target_extraction")
+        canvas = self.model_stage_canvases.get("target_extraction")
+        if ax is not None and canvas is not None:
+            ax.clear()
+            total = len(df)
+            rs_valid = int(pd.to_numeric(df.get("rs"), errors="coerce").notna().sum()) if "rs" in df.columns else 0
+            th_valid = int(pd.to_numeric(df.get("thickness"), errors="coerce").notna().sum()) if "thickness" in df.columns else 0
+            rsu_valid = int(pd.to_numeric(df.get("rsu"), errors="coerce").notna().sum()) if "rsu" in df.columns else 0
+            cats = ["rows_total", "rs_valid", "thickness_valid", "rsu_valid"]
+            vals = [total, rs_valid, th_valid, rsu_valid]
+            ax.bar(cats, vals, color=["#4c78a8", "#59a14f", "#e15759", "#76b7b2"])
+            ax.set_title("Target extraction validity")
+            ax.tick_params(axis="x", rotation=20)
+            ax.grid(True, alpha=0.2, axis="y")
+            self.model_stage_figures["target_extraction"].tight_layout()
+            canvas.draw_idle()
+
+        # 3) Model fitting diagnostics.
+        ax = self.model_stage_axes.get("model_fitting")
+        canvas = self.model_stage_canvases.get("model_fitting")
+        if ax is not None and canvas is not None:
+            ax.clear()
+            if self._last_training_artifacts is None:
+                ax.text(0.5, 0.5, "Train model first", ha="center", va="center", transform=ax.transAxes)
+                ax.set_axis_off()
+            else:
+                metrics = self._last_training_artifacts.metrics or {}
+                cats = ["rs_mae", "thickness_mae", "rsu_mae"]
+                vals = [float(metrics.get("rs_mae") or 0.0), float(metrics.get("thickness_mae") or 0.0), float(metrics.get("rsu_mae") or 0.0)]
+                ax.bar(cats, vals, color=["#59a14f", "#e15759", "#76b7b2"])
+                ax.set_title("Model fitting quality (MAE)")
+                ax.grid(True, alpha=0.2, axis="y")
+            self.model_stage_figures["model_fitting"].tight_layout()
+            canvas.draw_idle()
+
+        # 4) Time-aware evaluation diagnostics.
+        ax = self.model_stage_axes.get("time_aware_eval")
+        canvas = self.model_stage_canvases.get("time_aware_eval")
+        if ax is not None and canvas is not None:
+            ax.clear()
+            if self._last_training_artifacts is None:
+                ax.text(0.5, 0.5, "Train model first", ha="center", va="center", transform=ax.transAxes)
+                ax.set_axis_off()
+            else:
+                metrics = self._last_training_artifacts.metrics or {}
+                n_train = float(metrics.get("n_train") or 0.0)
+                n_test = float(metrics.get("n_test") or 0.0)
+                frac = float(metrics.get("test_fraction") or 0.0)
+                ax.bar(["n_train", "n_test"], [n_train, n_test], color=["#4c78a8", "#f28e2b"])
+                ax.set_title(f"Time-aware split (test_fraction={frac:.2f})")
+                ax.grid(True, alpha=0.2, axis="y")
+            self.model_stage_figures["time_aware_eval"].tight_layout()
+            canvas.draw_idle()
+
+        # 5) Confidence synthesis diagnostics.
+        ax = self.model_stage_axes.get("confidence")
+        canvas = self.model_stage_canvases.get("confidence")
+        if ax is not None and canvas is not None:
+            ax.clear()
+            if self._last_training_artifacts is None:
+                ax.text(0.5, 0.5, "Train model first", ha="center", va="center", transform=ax.transAxes)
+                ax.set_axis_off()
+            else:
+                ts = self._last_training_artifacts.train_summary or {}
+                conf = self._last_training_artifacts.confidence_summary or {}
+                row_count = float(ts.get("row_count") or 0.0)
+                target_count = float(ts.get("target_instance_count") or 0.0)
+                ax.bar(["row_count", "target_count"], [row_count, target_count], color=["#4c78a8", "#59a14f"])
+                level = str(conf.get("level", "unknown"))
+                notes = conf.get("notes", [])
+                ax.set_title(f"Confidence synthesis: {level}")
+                ax.text(
+                    0.02,
+                    0.95,
+                    f"notes={notes}",
+                    transform=ax.transAxes,
+                    va="top",
+                    fontsize=8,
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+                )
+                ax.grid(True, alpha=0.2, axis="y")
+            self.model_stage_figures["confidence"].tight_layout()
             canvas.draw_idle()
 
     def _draw_response_pipeline_plots(self, response: str, df: pd.DataFrame, X: pd.DataFrame, axes: list[Any]) -> None:
