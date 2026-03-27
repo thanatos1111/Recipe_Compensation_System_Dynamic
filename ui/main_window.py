@@ -362,15 +362,6 @@ class MainWindow(QMainWindow):
         self.recommendation_panel.set_context(dataset, active_target_id=self._current_target_id, config=self.config)
         self.update_panel.set_context(dataset, active_target_id=self._current_target_id, config=self.config)
 
-        # Persist overrides to user_config.json
-        self._persist_spec_and_lifetime_overrides(
-            material_name=self._current_material,
-            target_id=self._current_target_id,
-            spec_config=spec_config,
-            save_per_target=save_per_target,
-            max_lifetime=(max_lt_value if max_lt_enabled else None),
-        )
-
         # Reload effective config (so newly-saved overrides are reflected).
         self.user_config = load_user_config(self.project_root)
         self.config = load_effective_config(self.project_root)
