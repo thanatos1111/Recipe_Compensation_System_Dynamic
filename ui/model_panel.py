@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from core.evaluation_mode import ScenarioConfig, evaluate_data_sufficiency_scenarios
 from core.feature_engineering import build_feature_matrix, get_feature_schema
 from core.instance_correction import fit_instance_bias, summarize_recent_residuals
+from core.model_explanations import TrainingExplanation, build_training_explanation
 from core.pipeline_inspection import build_processing_view_data
 from core.response_models import train_material_models
 from core.schemas import MaterialDataset
@@ -136,6 +137,24 @@ class ModelPanel(QWidget):
         self.output.setReadOnly(True)
         training_layout.addWidget(self.output)
         training_layout.setStretchFactor(self.output, 1)
+
+        self.training_help_expand_btn = QToolButton()
+        self.training_help_expand_btn.setText("Training metric explanations")
+        self.training_help_expand_btn.setCheckable(True)
+        self.training_help_expand_btn.setChecked(False)
+        self.training_help_expand_btn.setArrowType(Qt.ArrowType.RightArrow)
+        self.training_help_expand_btn.toggled.connect(self._toggle_training_help)
+        training_layout.addWidget(self.training_help_expand_btn)
+
+        self.training_help_text = QTextEdit()
+        self.training_help_text.setReadOnly(True)
+        self.training_help_text.setVisible(False)
+        self.training_help_text.setToolTip(
+            "Dynamic explanation for training rows, spec counts, features, model type, validation, errors, "
+            "feature influence, residuals, confidence, and warnings."
+        )
+        training_layout.addWidget(self.training_help_text)
+        training_layout.setStretchFactor(self.training_help_text, 1)
         training_page.setLayout(training_layout)
         self.section_tabs.addTab(training_page, "1) Training")
 
@@ -435,6 +454,7 @@ class ModelPanel(QWidget):
         self._refresh_history_target_lists(active_target_id)
         self._init_cutoff(material_dataset, active_target_id)
         self._refresh_history_selection_enabled_state()
+        self._refresh_training_explanation()
         self._refresh_processing_view()
         self._refresh_model_pipeline_view()
 
@@ -492,6 +512,7 @@ class ModelPanel(QWidget):
             f"- notes: {artifacts.confidence_summary.get('notes')}\n"
             f"{correction_text}"
         )
+        self._refresh_training_explanation(train_df=train_df)
         self._refresh_model_pipeline_view()
 
     def _set_combo_items(self, combo: QComboBox, items: list[str], selected: str) -> None:
@@ -548,6 +569,11 @@ class ModelPanel(QWidget):
     def _toggle_training_targets_list(self, expanded: bool) -> None:
         self.training_targets_list.setVisible(expanded)
         self.train_targets_expand_btn.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        self._refresh_training_explanation()
+
+    def _toggle_training_help(self, expanded: bool) -> None:
+        self.training_help_text.setVisible(expanded)
+        self.training_help_expand_btn.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
 
     def _on_cutoff_edit_finished(self) -> None:
         self.cutoff_spin.interpretText()
@@ -558,9 +584,11 @@ class ModelPanel(QWidget):
     def _on_active_target_changed(self, target_id: str) -> None:
         if self._material_dataset is None:
             return
+        self._active_target_id = target_id
         self.training_active_target_label.setText(target_id)
         self._refresh_history_target_lists(target_id)
         self._init_cutoff(self._material_dataset, target_id)
+        self._refresh_training_explanation()
         self._refresh_processing_view()
         self._refresh_model_pipeline_view()
 
@@ -578,6 +606,7 @@ class ModelPanel(QWidget):
             self.model_pipeline_metrics_table.setRowCount(0)
             self.model_pipeline_metrics_table.setColumnCount(0)
             self.model_pipeline_stage_details.setPlainText("No rows available.")
+            self._refresh_training_explanation()
             return
 
         feature_config = self._config.get("feature_config", {})
@@ -599,8 +628,52 @@ class ModelPanel(QWidget):
         self._render_model_pipeline_stages(stage_rows)
         self._render_model_pipeline_metrics(schema)
         self._render_model_pipeline_plots(df, X)
+        self._refresh_training_explanation(train_df=df)
         if stage_rows:
             self.model_pipeline_stage_table.selectRow(0)
+
+    def _current_training_dataframe(self) -> Optional[pd.DataFrame]:
+        if self._material_dataset is None:
+            return None
+        df_all = self._material_dataset.all_records
+        if df_all is None or df_all.empty:
+            return df_all
+        selected_targets = self._selected_targets_from_widget(self.training_targets_list)
+        if selected_targets:
+            return df_all[df_all["target_id"].astype(str).isin(selected_targets)].copy()
+        return df_all.copy()
+
+    def _refresh_training_explanation(self, *, train_df: Optional[pd.DataFrame] = None) -> None:
+        if train_df is None:
+            train_df = self._current_training_dataframe()
+
+        feature_config = self._config.get("feature_config", {})
+        schema = get_feature_schema(feature_config)
+        explanation = build_training_explanation(
+            train_df=train_df,
+            artifacts=self._last_training_artifacts,
+            active_target_id=self._active_target_id,
+            feature_schema={"numeric": list(schema.numeric_features), "categorical": list(schema.categorical_features)},
+        )
+        self._render_training_explanation(explanation)
+
+    def _render_training_explanation(self, explanation: TrainingExplanation) -> None:
+        warning_text = "\n".join(f"- {w}" for w in explanation.warnings) if explanation.warnings else "- none"
+        lines = [
+            "Model training explanation",
+            "",
+            explanation.summary,
+            "",
+            "Metric interpretation:",
+        ]
+        for item in explanation.items:
+            lines.append(f"- {item.label}: {item.value}")
+            lines.append(f"  Meaning: {item.detail}")
+            lines.append(f"  Help: {item.tooltip}")
+        lines.extend(["", "Warnings:", warning_text])
+        self.training_help_text.setPlainText("\n".join(lines))
+        self.training_help_expand_btn.setToolTip(explanation.summary)
+        self.training_help_text.setToolTip(explanation.summary)
 
     def _render_model_pipeline_stages(self, rows: list[tuple[str, str, str]]) -> None:
         self.model_pipeline_stage_table.clear()

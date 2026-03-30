@@ -136,8 +136,18 @@
     "w_rsu": 1.0,
     "w_move": 0.1,
     "w_margin": 0.1
-  }
-  ,
+  },
+  "safe_band_settings": {
+    "parameters": [
+      "incident_angle",
+      "linear_offset",
+      "rotations",
+      "ar_flow",
+      "o2_flow"
+    ],
+    "search_width_steps": 3,
+    "clip_to_candidate_neighborhood": false
+  },
   "minimum_steps": {
     "rotations": 1.0,
     "incident_angle": 0.01,

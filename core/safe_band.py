@@ -4,7 +4,7 @@ Feasible-region / safe-band estimation (placeholder).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import pandas as pd
 
@@ -78,21 +78,33 @@ def _predicted_within_spec(predicted_outputs: dict[str, Any], spec_config: Any) 
 def estimate_parameter_band(
     center_recipe: dict[str, Any],
     model_bundle: dict[str, Any],
-    *,
     parameter_name: str,
     spec_config: Any,
     step: float,
     max_steps: int = 10,
+    center_value: Optional[float] = None,
+    clip_range: Optional[tuple[float, float]] = None,
 ) -> dict[str, Any]:
-    """Estimate acceptable parameter interval around a center recipe."""
+    """Estimate acceptable parameter interval around a center recipe.
+
+    The method varies one parameter at a time while keeping all other fields
+    fixed at the center recipe, then checks if each predicted point is in spec.
+    """
     if step is None or float(step) <= 0:
         return {"parameter_name": parameter_name, "lower": None, "upper": None, "passed_values": []}
 
     base = dict(center_recipe)
+    if center_value is None:
+        center_value = float(base.get(parameter_name, 0.0) or 0.0)
+    center = float(center_value)
     passed: list[float] = []
 
     for k in range(-max_steps, max_steps + 1):
-        cand_val = float(base.get(parameter_name, 0.0)) + k * float(step)
+        cand_val = center + k * float(step)
+        if clip_range is not None:
+            lo_clip, hi_clip = float(clip_range[0]), float(clip_range[1])
+            if cand_val < lo_clip or cand_val > hi_clip:
+                continue
         cand = dict(base)
         cand[parameter_name] = cand_val
 
@@ -157,10 +169,87 @@ def estimate_parameter_band(
 
     return {
         "parameter_name": parameter_name,
+        "center_value": center,
+        "search_step": float(step),
+        "search_max_steps": int(max_steps),
+        "search_range": [center - float(max_steps) * float(step), center + float(max_steps) * float(step)],
+        "clip_range": list(clip_range) if clip_range is not None else None,
         "lower": min(passed),
         "upper": max(passed),
         "passed_values": passed,
     }
+
+
+def get_candidate_search_range(
+    center_value: float,
+    *,
+    step: float,
+    radius_steps: int,
+) -> tuple[float, float]:
+    """Return optimizer candidate neighborhood range for one parameter."""
+    radius = float(step) * float(radius_steps)
+    c = float(center_value)
+    return (c - radius, c + radius)
+
+
+def estimate_multi_parameter_bands(
+    center_recipe: dict[str, Any],
+    model_bundle: dict[str, Any],
+    *,
+    parameter_names: list[str],
+    spec_config: Any,
+    parameter_steps: dict[str, float],
+    candidate_radius_steps: int,
+    safe_band_max_steps: int,
+    clip_to_candidate_range: bool = False,
+) -> dict[str, Any]:
+    """Estimate safe bands for multiple key parameters.
+
+    Returns per-parameter metadata with center value, candidate range,
+    safe-band search range, and feasible band.
+    """
+    results: dict[str, Any] = {}
+    for parameter_name in parameter_names:
+        center = float(center_recipe.get(parameter_name, 0.0) or 0.0)
+        step = float(parameter_steps.get(parameter_name, 0.0) or 0.0)
+        if step <= 0:
+            step = 1.0 if parameter_name == "rotations" else 0.01
+
+        candidate_range = get_candidate_search_range(
+            center,
+            step=step,
+            radius_steps=int(candidate_radius_steps),
+        )
+        band_search_range = get_candidate_search_range(
+            center,
+            step=step,
+            radius_steps=int(safe_band_max_steps),
+        )
+        clip_range = candidate_range if clip_to_candidate_range else None
+
+        band = estimate_parameter_band(
+            center_recipe,
+            model_bundle,
+            parameter_name=parameter_name,
+            spec_config=spec_config,
+            step=step,
+            max_steps=int(safe_band_max_steps),
+            center_value=center,
+            clip_range=clip_range,
+        )
+        results[parameter_name] = {
+            "parameter_name": parameter_name,
+            "center_value": center,
+            "candidate_search_range": list(candidate_range),
+            "safe_band_search_range": list(band_search_range),
+            "feasible_band": (
+                [band.get("lower"), band.get("upper")]
+                if band.get("lower") is not None and band.get("upper") is not None
+                else None
+            ),
+            "safe_band_detail": band,
+        }
+    return results
 
 
 def build_feasible_map(

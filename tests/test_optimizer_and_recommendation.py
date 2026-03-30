@@ -6,7 +6,7 @@ import pandas as pd
 from core.candidate_generator import generate_candidates
 from core.constraints import enforce_coupling_rules
 from core.optimizer import rank_candidates, select_best_candidate
-from core.safe_band import estimate_parameter_band
+from core.safe_band import estimate_multi_parameter_bands, estimate_parameter_band
 from core.schemas import SpecConfig
 
 
@@ -309,6 +309,150 @@ class TestOptimizerAndRecommendation(unittest.TestCase):
             v = float(row["incident_angle"])
             q = round(v / step) * step
             self.assertAlmostEqual(v, q, places=6)
+
+    def test_multi_parameter_safe_band_reports_expected_ranges(self) -> None:
+        spec = SpecConfig(
+            rs_target=10.0,
+            rs_tol=1.0,
+            use_rs_target_mode=True,
+            use_rs_spec=True,
+            use_thickness_spec=False,
+            use_rsu_spec=False,
+            rsu_max=0.0,
+            use_thickness_target_mode=False,
+        )
+
+        feature_config = {
+            "numeric_features": [
+                "lifetime",
+                "lifetime_used",
+                "lifetime_end",
+                "incident_angle",
+                "linear_offset",
+                "rotations",
+                "rpm",
+                "power",
+                "ar_flow",
+                "o2_flow",
+                "o2_ratio",
+                "total_flow",
+            ],
+            "categorical_features": ["target_id"],
+        }
+        model_bundle = {
+            "rs_model": DummyModel("incident_angle"),
+            "thickness_model": DummyModel("linear_offset"),
+            "rsu_model": DummyModel("o2_flow"),
+            "feature_config": feature_config,
+            "instance_correction": None,
+        }
+        center = {
+            "incident_angle": 10.0,
+            "linear_offset": 0.0,
+            "rotations": 100.0,
+            "ar_flow": 20.0,
+            "o2_flow": 10.0,
+            "target_id": "Ta.1",
+            "lifetime": 0.0,
+            "rpm": 60.0,
+            "power": 1000.0,
+        }
+
+        out = estimate_multi_parameter_bands(
+            center,
+            model_bundle,
+            parameter_names=["incident_angle", "linear_offset"],
+            spec_config=spec,
+            parameter_steps={"incident_angle": 0.5, "linear_offset": 0.1},
+            candidate_radius_steps=2,
+            safe_band_max_steps=4,
+            clip_to_candidate_range=False,
+        )
+
+        ia = out["incident_angle"]
+        self.assertEqual(ia["candidate_search_range"], [9.0, 11.0])
+        self.assertEqual(ia["safe_band_search_range"], [8.0, 12.0])
+        self.assertEqual(ia["feasible_band"], [9.0, 11.0])
+
+        lo = out["linear_offset"]
+        # linear_offset does not affect RS in this dummy setup, so feasible
+        # band spans full safe-band search range.
+        self.assertEqual(lo["candidate_search_range"], [-0.2, 0.2])
+        self.assertEqual(lo["safe_band_search_range"], [-0.4, 0.4])
+        self.assertEqual(lo["feasible_band"], [-0.4, 0.4])
+
+    def test_safe_band_can_be_clipped_to_candidate_neighborhood(self) -> None:
+        spec = SpecConfig(
+            rs_target=10.0,
+            rs_tol=1.0,
+            use_rs_target_mode=True,
+            use_rs_spec=True,
+            use_thickness_spec=False,
+            use_rsu_spec=False,
+            rsu_max=0.0,
+            use_thickness_target_mode=False,
+        )
+        feature_config = {
+            "numeric_features": [
+                "lifetime",
+                "lifetime_used",
+                "lifetime_end",
+                "incident_angle",
+                "linear_offset",
+                "rotations",
+                "rpm",
+                "power",
+                "ar_flow",
+                "o2_flow",
+                "o2_ratio",
+                "total_flow",
+            ],
+            "categorical_features": ["target_id"],
+        }
+        model_bundle = {
+            "rs_model": DummyModel("incident_angle"),
+            "thickness_model": DummyModel("linear_offset"),
+            "rsu_model": DummyModel("o2_flow"),
+            "feature_config": feature_config,
+            "instance_correction": None,
+        }
+        center = {
+            "incident_angle": 10.0,
+            "linear_offset": 0.0,
+            "rotations": 100.0,
+            "ar_flow": 20.0,
+            "o2_flow": 10.0,
+            "target_id": "Ta.1",
+            "lifetime": 0.0,
+            "rpm": 60.0,
+            "power": 1000.0,
+        }
+
+        unclipped = estimate_multi_parameter_bands(
+            center,
+            model_bundle,
+            parameter_names=["linear_offset"],
+            spec_config=spec,
+            parameter_steps={"linear_offset": 0.1},
+            candidate_radius_steps=1,
+            safe_band_max_steps=4,
+            clip_to_candidate_range=False,
+        )["linear_offset"]
+        clipped = estimate_multi_parameter_bands(
+            center,
+            model_bundle,
+            parameter_names=["linear_offset"],
+            spec_config=spec,
+            parameter_steps={"linear_offset": 0.1},
+            candidate_radius_steps=1,
+            safe_band_max_steps=4,
+            clip_to_candidate_range=True,
+        )["linear_offset"]
+
+        self.assertEqual(unclipped["candidate_search_range"], [-0.1, 0.1])
+        self.assertEqual(unclipped["feasible_band"], [-0.4, 0.4])
+        self.assertEqual(clipped["candidate_search_range"], [-0.1, 0.1])
+        self.assertEqual(clipped["feasible_band"], [-0.1, 0.1])
 
 
 if __name__ == "__main__":
