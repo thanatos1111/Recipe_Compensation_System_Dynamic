@@ -11,17 +11,28 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
-from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
 
 from core.feature_engineering import build_feature_matrix, get_feature_schema
 from core.labeling import apply_spec_labels
 from core.schemas import BenchmarkFoldResult, BenchmarkSummary, MaterialModelArtifacts, SpecConfig
+from core.model_registry import build_preprocessed_regression_pipeline
 from core.validation_schemes import split_strategy_to_iter
+
+
+def _model_name_for_target(target_col: str, config: dict[str, Any]) -> str:
+    """
+    Resolve model registry name for a target regression output.
+
+    Per-target keys supported:
+    - ``rs_model``
+    - ``thickness_model``
+    - ``rsu_model``
+    """
+    ms = config.get("model_settings", {}) or {}
+    fallback = str(ms.get("rs_model", "gbr"))
+    return str(ms.get(f"{target_col}_model", fallback))
 
 
 def build_model_pipeline(target_col: str, config: dict[str, Any]) -> Pipeline:
@@ -31,44 +42,16 @@ def build_model_pipeline(target_col: str, config: dict[str, Any]) -> Pipeline:
     Model choice mirrors ``_train_regression_model`` / prior milestone behavior.
     """
     feature_schema = get_feature_schema(config.get("feature_config", {}))
-    numeric_features = list(feature_schema.numeric_features)
-    categorical_features = list(feature_schema.categorical_features)
-
-    numeric_transformer = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="median")),
-        ]
-    )
-    categorical_transformer = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("onehot", OneHotEncoder(handle_unknown="ignore")),
-        ]
-    )
-
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("num", numeric_transformer, numeric_features),
-            ("cat", categorical_transformer, categorical_features),
-        ],
-        remainder="drop",
-    )
-
-    ms = config.get("model_settings", {})
-    model_type = str(
-        ms.get(f"{target_col}_model", ms.get("rs_model", "gbr"))
-    )
+    ms = config.get("model_settings", {}) or {}
     random_state = int(ms.get("random_state", 0))
-
-    if model_type.lower() in {"rf", "random_forest"}:
-        model = RandomForestRegressor(
-            n_estimators=int(ms.get("rf_n_estimators", 200)),
-            random_state=random_state,
-        )
-    else:
-        model = GradientBoostingRegressor(random_state=random_state)
-
-    return Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
+    model_name = _model_name_for_target(target_col, config)
+    return build_preprocessed_regression_pipeline(
+        model_name,
+        numeric_features=list(feature_schema.numeric_features),
+        categorical_features=list(feature_schema.categorical_features),
+        config=config,
+        random_state=random_state,
+    )
 
 
 def fit_model_for_target(
@@ -203,7 +186,12 @@ def _spec_pass_accuracy(
     return float(acc)
 
 
-def _aggregate_folds(folds: list[BenchmarkFoldResult], split_type: str) -> BenchmarkSummary:
+def _aggregate_folds(
+    folds: list[BenchmarkFoldResult],
+    split_type: str,
+    *,
+    model_names: dict[str, str],
+) -> BenchmarkSummary:
     def mean_std(values: list[Optional[float]]) -> tuple[Optional[float], Optional[float]]:
         xs = [float(v) for v in values if v is not None]
         if not xs:
@@ -212,7 +200,7 @@ def _aggregate_folds(folds: list[BenchmarkFoldResult], split_type: str) -> Bench
         return float(arr.mean()), float(arr.std(ddof=0))
 
     if not folds:
-        return BenchmarkSummary(split_type=split_type, folds=[])
+        return BenchmarkSummary(split_type=split_type, folds=[], model_names=model_names)
 
     keys = [
         "rs_mae",
@@ -231,6 +219,7 @@ def _aggregate_folds(folds: list[BenchmarkFoldResult], split_type: str) -> Bench
     return BenchmarkSummary(
         split_type=split_type,
         folds=folds,
+        model_names=model_names,
         rs_mae_mean=agg["rs_mae"][0],
         rs_mae_std=agg["rs_mae"][1],
         rs_rmse_mean=agg["rs_rmse"][0],
@@ -290,6 +279,11 @@ def evaluate_models_with_splits(
         split_iter = iter(())
 
     feature_config = config.get("feature_config", {})
+    model_names = {
+        "rs": _model_name_for_target("rs", config),
+        "thickness": _model_name_for_target("thickness", config),
+        "rsu": _model_name_for_target("rsu", config),
+    }
 
     for split_name, split_type, train_idx, test_idx in split_iter:
         tr = train_idx.intersection(df.index)
@@ -303,6 +297,9 @@ def evaluate_models_with_splits(
                     test_row_count=0,
                     train_target_ids=[],
                     test_target_ids=[],
+                    rs_model_name=model_names["rs"],
+                    thickness_model_name=model_names["thickness"],
+                    rsu_model_name=model_names["rsu"],
                     warnings=["invalid_split"],
                 )
             )
@@ -360,13 +357,16 @@ def evaluate_models_with_splits(
                 rsu_mae=rsu_mae,
                 rsu_rmse=rsu_rmse,
                 spec_pass_accuracy=spec_acc,
+                rs_model_name=model_names["rs"],
+                thickness_model_name=model_names["thickness"],
+                rsu_model_name=model_names["rsu"],
                 warnings=[],
             )
         )
 
     # Determine split_type from first fold or strategy
     stype = fold_results[0].split_type if fold_results else split_strategy
-    summary = _aggregate_folds(fold_results, stype)
+    summary = _aggregate_folds(fold_results, stype, model_names=model_names)
     if warnings_global:
         summary.aggregate_warnings.extend(warnings_global)
 
@@ -414,6 +414,12 @@ def train_material_models(
     schema = get_feature_schema(feature_config)
     X = build_feature_matrix(df, feature_config)
 
+    model_names = {
+        "rs": _model_name_for_target("rs", config),
+        "thickness": _model_name_for_target("thickness", config),
+        "rsu": _model_name_for_target("rsu", config),
+    }
+
     rs_model = train_rs_model(df, X, config)
     thickness_model = train_thickness_model(df, X, config)
     rsu_model = train_rsu_model(df, X, config)
@@ -443,6 +449,10 @@ def train_material_models(
         rs_model=rs_model,
         thickness_model=thickness_model,
         rsu_model=rsu_model,
+        rs_model_name=model_names["rs"],
+        thickness_model_name=model_names["thickness"],
+        rsu_model_name=model_names["rsu"],
+        model_names=model_names,
         spec_classifier=None,
         feature_schema={"numeric": schema.numeric_features, "categorical": schema.categorical_features},
         metrics=metrics,

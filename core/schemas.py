@@ -67,6 +67,9 @@ class BenchmarkFoldResult:
     rsu_mae: Optional[float] = None
     rsu_rmse: Optional[float] = None
     spec_pass_accuracy: Optional[float] = None
+    rs_model_name: Optional[str] = None
+    thickness_model_name: Optional[str] = None
+    rsu_model_name: Optional[str] = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -76,6 +79,7 @@ class BenchmarkSummary:
 
     split_type: str
     folds: list[BenchmarkFoldResult]
+    model_names: dict[str, str] = field(default_factory=dict)
     rs_mae_mean: Optional[float] = None
     rs_mae_std: Optional[float] = None
     rs_rmse_mean: Optional[float] = None
@@ -101,6 +105,10 @@ class MaterialModelArtifacts:
 
     spec_classifier: Any = None
     feature_schema: dict[str, Any] = field(default_factory=dict)
+    rs_model_name: Optional[str] = None
+    thickness_model_name: Optional[str] = None
+    rsu_model_name: Optional[str] = None
+    model_names: dict[str, str] = field(default_factory=dict)
 
     metrics: dict[str, Any] = field(default_factory=dict)
     train_summary: dict[str, Any] = field(default_factory=dict)
