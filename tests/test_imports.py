@@ -18,6 +18,8 @@ CORE_MODULES = [
     "core.optimizer",
     "core.safe_band",
     "core.recommendation_engine",
+    "core.recommendation_backtest",
+    "core.uncertainty",
     "core.update_pipeline",
     "core.exports",
 ]

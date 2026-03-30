@@ -5,6 +5,7 @@ Model training and evaluation panel.
 from __future__ import annotations
 
 from typing import Any, Optional
+import threading
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QProgressBar,
     QScrollArea,
     QPushButton,
     QSplitter,
@@ -29,6 +31,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QSpinBox,
     QTextEdit,
     QToolButton,
     QVBoxLayout,
@@ -109,6 +112,10 @@ class ModelPanel(QWidget):
         self._last_benchmark_ranked: list[dict[str, Any]] = []
         self._last_benchmark_best_bundle: Optional[str] = None
         self._last_benchmark_uncertainty_enabled: bool = False
+        self._last_recommendation_backtest_result: Optional[Any] = None
+        self._backtest_thread: Optional[QThread] = None
+        self._backtest_worker: Optional[_BacktestWorker] = None
+        self._backtest_abort_event: Optional[threading.Event] = None
 
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Model and evaluation panel"))
@@ -561,14 +568,77 @@ class ModelPanel(QWidget):
         benchmark_layout.addWidget(benchmark_controls_box)
 
         self.bench_summary_table = QTableWidget()
-        self.bench_summary_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # Ensure full header text is visible.
+        # If total column width exceeds available space, QTableWidget will
+        # show a horizontal scrollbar (see policy below).
+        self.bench_summary_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.bench_summary_table.horizontalHeader().setStretchLastSection(False)
+        self.bench_summary_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.bench_summary_table.setMinimumHeight(120)
         benchmark_layout.addWidget(self.bench_summary_table)
 
         self.bench_fold_table = QTableWidget()
-        self.bench_fold_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # Same approach as bench_summary_table.
+        self.bench_fold_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.bench_fold_table.horizontalHeader().setStretchLastSection(False)
+        self.bench_fold_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.bench_fold_table.setMinimumHeight(180)
         benchmark_layout.addWidget(self.bench_fold_table)
+
+        # Recommendation backtesting subsection (Milestone 6).
+        self.bench_backtest_group = QGroupBox("Recommendation Backtest (fold replay)")
+        backtest_layout = QVBoxLayout()
+
+        self.bench_backtest_enabled_checkbox = QCheckBox("Enable recommendation backtest after benchmark")
+        self.bench_backtest_enabled_checkbox.setChecked(False)
+        self.bench_backtest_enabled_checkbox.toggled.connect(self._on_bench_backtest_toggled)
+        backtest_layout.addWidget(self.bench_backtest_enabled_checkbox)
+
+        # Progress + controls (must stay responsive via QThread).
+        progress_row = QHBoxLayout()
+        self.bench_backtest_progress = QProgressBar()
+        self.bench_backtest_progress.setRange(0, 100)
+        self.bench_backtest_progress.setValue(0)
+        self.bench_backtest_progress.setTextVisible(True)
+        self.bench_backtest_progress.setFormat("%p%")
+        progress_row.addWidget(self.bench_backtest_progress, 1)
+
+        self.bench_backtest_max_test_rows_spin = QSpinBox()
+        self.bench_backtest_max_test_rows_spin.setRange(1, 100000)
+        self.bench_backtest_max_test_rows_spin.setValue(50)
+        progress_row.addWidget(QLabel("Max test rows/fold:"))
+        progress_row.addWidget(self.bench_backtest_max_test_rows_spin)
+
+        self.bench_backtest_abort_button = QPushButton("Abort backtest")
+        self.bench_backtest_abort_button.setEnabled(False)
+        self.bench_backtest_abort_button.clicked.connect(self._on_bench_backtest_abort_clicked)
+        progress_row.addWidget(self.bench_backtest_abort_button)
+
+        backtest_layout.addLayout(progress_row)
+
+        self.bench_backtest_table = QTableWidget()
+        # Keep long column titles visible; show horizontal scroll when needed.
+        self.bench_backtest_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.bench_backtest_table.horizontalHeader().setStretchLastSection(False)
+        self.bench_backtest_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.bench_backtest_table.setMinimumHeight(150)
+        backtest_layout.addWidget(self.bench_backtest_table)
+
+        self.bench_backtest_fig = Figure(figsize=(6, 3.2))
+        self.bench_backtest_ax = self.bench_backtest_fig.add_subplot(111)
+        if FigureCanvas is not None:
+            self.bench_backtest_canvas = FigureCanvas(self.bench_backtest_fig)
+            self.bench_backtest_canvas.setMinimumHeight(160)
+            backtest_layout.addWidget(self.bench_backtest_canvas)
+        else:
+            self.bench_backtest_canvas = None
+            backtest_layout.addWidget(QLabel("Matplotlib Qt canvas not available."))
+
+        self.bench_backtest_group.setLayout(backtest_layout)
+        # Keep the checkbox + progress controls visible; only the table/plot
+        # are toggled when the user enables/disables the backtest.
+        self.bench_backtest_group.setVisible(True)
+        benchmark_layout.addWidget(self.bench_backtest_group)
 
         bench_bottom_split = QSplitter()
         bench_bottom_split.setOrientation(Qt.Orientation.Horizontal)
@@ -595,6 +665,9 @@ class ModelPanel(QWidget):
         benchmark_page.setLayout(benchmark_page_layout)
         self.section_tabs.addTab(benchmark_page, "5) Benchmark")
         self._on_benchmark_split_mode_changed(self.bench_split_mode_combo.currentText())
+
+        # Initialize backtest widgets to the "disabled" state.
+        self._on_bench_backtest_toggled(bool(self.bench_backtest_enabled_checkbox.isChecked()))
 
         self.setLayout(layout)
 
@@ -1432,6 +1505,106 @@ class ModelPanel(QWidget):
         is_active_cutoff = str(split_mode).strip() == "active_target_cutoff"
         self.bench_active_cutoff_box.setVisible(is_active_cutoff)
 
+    def _on_bench_backtest_toggled(self, checked: bool) -> None:
+        self._last_recommendation_backtest_result = None
+        self.bench_backtest_progress.setValue(0)
+        self.bench_backtest_abort_button.setEnabled(False)
+        self.bench_backtest_max_test_rows_spin.setEnabled(bool(checked))
+        self.bench_backtest_table.clear()
+        self.bench_backtest_table.setRowCount(0)
+        self.bench_backtest_table.setColumnCount(0)
+        if self.bench_backtest_ax is not None:
+            self.bench_backtest_ax.clear()
+            self.bench_backtest_ax.grid(True, alpha=0.2)
+            if self.bench_backtest_canvas is not None:
+                self.bench_backtest_canvas.draw_idle()
+
+    def _on_bench_backtest_abort_clicked(self) -> None:
+        if self._backtest_abort_event is not None:
+            self._backtest_abort_event.set()
+            self.bench_status_label.setText("Aborting recommendation backtest...")
+            self.bench_backtest_abort_button.setEnabled(False)
+
+    def _on_backtest_progress(self, percent: int, stage: str) -> None:
+        # Runs in the UI thread via Qt queued signal.
+        try:
+            self.bench_backtest_progress.setValue(int(percent))
+        except Exception:
+            return
+        if stage:
+            self.bench_status_label.setText(f"Recommendation backtest... {int(percent)}% ({stage})")
+        else:
+            self.bench_status_label.setText(f"Recommendation backtest... {int(percent)}%")
+
+    def _render_recommendation_backtest(self, backtest_result: Any) -> None:
+        if backtest_result is None:
+            self._on_bench_backtest_toggled(False)
+            return
+
+        rows = backtest_result.to_table_rows()
+        headers = [
+            "bundle_name",
+            "rows_evaluated",
+            "recommendation_improvement_rate",
+            "predicted_spec_pass_improvement_rate",
+            "no_change_fraction",
+            "move_mean_abs_total",
+            "move_median_abs_total",
+            "move_max_abs_total",
+        ]
+
+        self.bench_backtest_table.clear()
+        self.bench_backtest_table.setRowCount(len(rows))
+        self.bench_backtest_table.setColumnCount(len(headers))
+        for ci, h in enumerate(headers):
+            self.bench_backtest_table.setHorizontalHeaderItem(ci, QTableWidgetItem(h))
+
+        def fmt_val(v: Any, *, col: str) -> str:
+            if v is None:
+                return "-"
+            if isinstance(v, (int, float)):
+                if col.endswith("_rate") or col.endswith("fraction"):
+                    return f"{float(v) * 100.0:.1f}%"
+                return f"{float(v):.6g}"
+            return str(v)
+
+        for ri, row in enumerate(rows):
+            for ci, h in enumerate(headers):
+                self.bench_backtest_table.setItem(ri, ci, QTableWidgetItem(fmt_val(row.get(h), col=h)))
+
+        self.bench_backtest_table.resizeRowsToContents()
+        self.bench_backtest_table.resizeColumnsToContents()
+
+        # Simple plots: compare rates side-by-side.
+        if self.bench_backtest_ax is None:
+            return
+
+        self.bench_backtest_ax.clear()
+        if not rows:
+            self.bench_backtest_ax.set_title("No backtest data")
+            if self.bench_backtest_canvas is not None:
+                self.bench_backtest_canvas.draw_idle()
+            return
+
+        bundles = [str(r.get("bundle_name", "")) for r in rows]
+        improve = [float(r.get("recommendation_improvement_rate") or 0.0) for r in rows]
+        spec_improve = [float(r.get("predicted_spec_pass_improvement_rate") or 0.0) for r in rows]
+
+        x = list(range(len(bundles)))
+        width = 0.38
+        self.bench_backtest_ax.bar([v - width / 2 for v in x], improve, width=width, label="Score improvement rate", color="#4c78a8")
+        self.bench_backtest_ax.bar([v + width / 2 for v in x], spec_improve, width=width, label="Pred spec-pass improvement rate", color="#59a14f")
+        self.bench_backtest_ax.set_xticks(x)
+        self.bench_backtest_ax.set_xticklabels(bundles, rotation=25, ha="right")
+        self.bench_backtest_ax.set_ylim(0.0, 1.0)
+        self.bench_backtest_ax.set_ylabel("Rate")
+        self.bench_backtest_ax.set_title("Recommendation backtest (fold replay)")
+        self.bench_backtest_ax.grid(True, alpha=0.2, axis="y")
+        self.bench_backtest_ax.legend(fontsize=8, loc="best")
+
+        if self.bench_backtest_canvas is not None:
+            self.bench_backtest_canvas.draw_idle()
+
     def _benchmark_run_clicked(self) -> None:
         if self._material_dataset is None:
             self.bench_status_label.setText("No material selected.")
@@ -1527,7 +1700,16 @@ class ModelPanel(QWidget):
         self._render_benchmark_chart(suite)
         self._render_benchmark_best_explanation(suite, ranked)
 
-        self.bench_status_label.setText("Completed.")
+        # Optional recommendation backtest.
+        if self.bench_backtest_enabled_checkbox.isChecked():
+            self._start_backtest_worker(df, bench_config, selected_bundles, split_mode)
+        else:
+            self._on_bench_backtest_toggled(False)
+
+        if self.bench_backtest_enabled_checkbox.isChecked():
+            self.bench_status_label.setText("Benchmark completed. Waiting for recommendation backtest...")
+        else:
+            self.bench_status_label.setText("Completed.")
 
     def _benchmark_export_summary_csv(self) -> None:
         if self._last_benchmark_suite_results is None:
@@ -1611,6 +1793,8 @@ class ModelPanel(QWidget):
                 self.bench_summary_table.setItem(ri, ci, QTableWidgetItem(sval))
 
         self.bench_summary_table.resizeRowsToContents()
+        # Update column widths based on (potentially longer) header text.
+        self.bench_summary_table.resizeColumnsToContents()
 
     def _render_benchmark_fold_table(self, suite: Any) -> None:
         rows = flatten_benchmark_suite_folds(suite)
@@ -1656,6 +1840,8 @@ class ModelPanel(QWidget):
                 self.bench_fold_table.setItem(ri, ci, QTableWidgetItem(fmt(row.get(h))))
 
         self.bench_fold_table.resizeRowsToContents()
+        # Update column widths based on (potentially longer) header text.
+        self.bench_fold_table.resizeColumnsToContents()
 
     def _render_benchmark_chart(self, suite: Any) -> None:
         if self.bench_fig is None or self.bench_ax is None:
@@ -1793,6 +1979,125 @@ class ModelPanel(QWidget):
         self._eval_worker.failed.connect(self._eval_thread.quit)
         self._eval_thread.finished.connect(self._cleanup_eval_worker)
         self._eval_thread.start()
+
+    def _start_backtest_worker(
+        self,
+        df: pd.DataFrame,
+        config: dict[str, Any],
+        selected_bundles: list[str],
+        split_mode: str,
+    ) -> None:
+        if self._backtest_thread is not None and self._backtest_thread.isRunning():
+            self.bench_status_label.setText("Recommendation backtest already running...")
+            return
+
+        self.bench_run_button.setEnabled(False)
+        self.bench_status_label.setText("Running recommendation backtest...")
+        self.bench_backtest_enabled_checkbox.setEnabled(False)
+        self.bench_backtest_abort_button.setEnabled(True)
+        self.bench_backtest_progress.setValue(0)
+
+        max_test_rows_per_fold = int(self.bench_backtest_max_test_rows_spin.value())
+        self.bench_backtest_max_test_rows_spin.setEnabled(False)
+        self._backtest_abort_event = threading.Event()
+
+        self._backtest_thread = QThread(self)
+        self._backtest_worker = _BacktestWorker(
+            df=df.copy(),
+            config=dict(config),
+            model_bundle_names=list(selected_bundles),
+            split_mode=split_mode,
+            max_test_rows_per_fold=max_test_rows_per_fold,
+            abort_event=self._backtest_abort_event,
+        )
+        self._backtest_worker.moveToThread(self._backtest_thread)
+        self._backtest_thread.started.connect(self._backtest_worker.run)
+        self._backtest_worker.finished.connect(self._on_backtest_finished)
+        self._backtest_worker.failed.connect(self._on_backtest_failed)
+        if hasattr(self._backtest_worker, "progress"):
+            self._backtest_worker.progress.connect(self._on_backtest_progress)
+        self._backtest_worker.finished.connect(self._backtest_thread.quit)
+        self._backtest_worker.failed.connect(self._backtest_thread.quit)
+        self._backtest_thread.finished.connect(self._cleanup_backtest_worker)
+        self._backtest_thread.start()
+
+    def _on_backtest_finished(self, result: Any) -> None:
+        self._last_recommendation_backtest_result = result
+        self._render_recommendation_backtest(result)
+        self.bench_backtest_enabled_checkbox.setEnabled(True)
+        self.bench_run_button.setEnabled(True)
+        self.bench_backtest_abort_button.setEnabled(False)
+        self.bench_backtest_max_test_rows_spin.setEnabled(self.bench_backtest_enabled_checkbox.isChecked())
+        if getattr(result, "aborted", False):
+            self.bench_status_label.setText("Recommendation backtest aborted.")
+        else:
+            self.bench_status_label.setText("Recommendation backtest completed.")
+
+    def _on_backtest_failed(self, message: str) -> None:
+        self._last_recommendation_backtest_result = None
+        self.bench_backtest_enabled_checkbox.setEnabled(True)
+        self.bench_run_button.setEnabled(True)
+        self.bench_backtest_abort_button.setEnabled(False)
+        self.bench_backtest_max_test_rows_spin.setEnabled(self.bench_backtest_enabled_checkbox.isChecked())
+        self.bench_best_explanation.setPlainText(f"Recommendation backtest failed: {message}")
+        self.bench_status_label.setText("Recommendation backtest failed.")
+
+    def _cleanup_backtest_worker(self) -> None:
+        if self._backtest_worker is not None:
+            self._backtest_worker.deleteLater()
+        self._backtest_worker = None
+        if self._backtest_thread is not None:
+            self._backtest_thread.deleteLater()
+        self._backtest_thread = None
+        self._backtest_abort_event = None
+        self.bench_backtest_abort_button.setEnabled(False)
+        self.bench_backtest_max_test_rows_spin.setEnabled(self.bench_backtest_enabled_checkbox.isChecked())
+
+
+class _BacktestWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+    progress = Signal(int, str)
+
+    def __init__(
+        self,
+        *,
+        df: pd.DataFrame,
+        config: dict[str, Any],
+        model_bundle_names: list[str],
+        split_mode: str,
+        max_test_rows_per_fold: int,
+        abort_event: Any,
+    ) -> None:
+        super().__init__()
+        self._df = df
+        self._config = config
+        self._model_bundle_names = model_bundle_names
+        self._split_mode = split_mode
+        self._max_test_rows_per_fold = max_test_rows_per_fold
+        self._abort_event = abort_event
+
+    def run(self) -> None:
+        try:
+            from core.recommendation_backtest import run_recommendation_backtest
+
+            def _progress_cb(done: int, total: int, stage: str) -> None:
+                pct = int((done / total) * 100.0) if total else 0
+                # stage can be long; keep it as-is for tooltip-ish status.
+                self.progress.emit(pct, stage)
+
+            result = run_recommendation_backtest(
+                self._df,
+                config=self._config,
+                model_bundle_names=self._model_bundle_names,
+                split_mode=self._split_mode,
+                max_test_rows_per_fold=self._max_test_rows_per_fold,
+                abort_event=self._abort_event,
+                progress_cb=_progress_cb,
+            )
+            self.finished.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
     def _on_eval_finished(self, result: dict[str, Any]) -> None:
         self._render_eval_result(result)
