@@ -46,6 +46,10 @@ class TestEvaluationMode(unittest.TestCase):
         cfg = {
             "feature_config": {},
             "model_settings": {"random_state": 0, "test_fraction": 0.2},
+            "benchmark_settings": {
+                "split_strategy": "forward_chaining",
+                "forward_chaining": {"n_splits": 1, "min_train_rows": 10, "min_test_rows": 4},
+            },
             "parameter_constraints": {
                 "incident_angle": {"type": "continuous", "min_value": 0.0, "max_value": 90.0, "step": 0.5, "is_enabled": True},
                 "linear_offset": {"type": "continuous", "min_value": -5.0, "max_value": 5.0, "step": 0.05, "is_enabled": True},
@@ -82,7 +86,13 @@ class TestEvaluationMode(unittest.TestCase):
 
     def test_cutoff_controls_test_set(self) -> None:
         df = self._make_df()
-        cfg = {"feature_config": {}, "model_settings": {"random_state": 0}}
+        cfg = {
+            "feature_config": {},
+            "model_settings": {"random_state": 0},
+            "benchmark_settings": {
+                "forward_chaining": {"n_splits": 1, "min_train_rows": 10, "min_test_rows": 4},
+            },
+        }
         spec = SpecConfig(use_rs_spec=False, use_thickness_spec=False, use_rsu_spec=False, rsu_max=0.0)
         out = evaluate_data_sufficiency_scenarios(
             df,

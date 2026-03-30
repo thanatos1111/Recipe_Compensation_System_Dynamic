@@ -50,6 +50,9 @@ class TestModelsAndCorrection(unittest.TestCase):
         cfg = {
             "feature_config": {},
             "model_settings": {"random_state": 0, "test_fraction": 0.2},
+            "benchmark_settings": {
+                "forward_chaining": {"n_splits": 1, "min_train_rows": 10, "min_test_rows": 5},
+            },
         }
 
         artifacts = train_material_models(df, config=cfg)
@@ -82,6 +85,9 @@ class TestModelsAndCorrection(unittest.TestCase):
         cfg = {
             "feature_config": {},
             "model_settings": {"random_state": 0, "test_fraction": 0.2},
+            "benchmark_settings": {
+                "forward_chaining": {"n_splits": 1, "min_train_rows": 10, "min_test_rows": 5},
+            },
         }
         artifacts = train_material_models(subset, config=cfg)
         self.assertIsNotNone(artifacts)

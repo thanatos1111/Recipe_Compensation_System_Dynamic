@@ -260,12 +260,22 @@ def _model_name(model: Any) -> str:
 def _describe_validation(metrics: dict[str, Any]) -> str:
     n_train = metrics.get("n_train")
     n_test = metrics.get("n_test")
+    n_folds = metrics.get("n_folds")
+    st = metrics.get("benchmark_split_type")
+    if st:
+        return (
+            f"leakage-free benchmark ({st}"
+            + (f", {int(n_folds)} folds" if n_folds is not None else "")
+            + ", mean train/test row counts per fold"
+            + (f": train≈{float(n_train):.1f}, test≈{float(n_test):.1f}" if n_train is not None and n_test is not None else "")
+            + ")"
+        )
     frac = metrics.get("test_fraction")
     if n_train is None or n_test is None:
-        return "time-aware holdout (pending)"
+        return "holdout evaluation (pending)"
     if frac is None:
-        return f"time-aware holdout (train={n_train}, test={n_test})"
-    return f"time-aware holdout (train={n_train}, test={n_test}, test_fraction={float(frac):.2f})"
+        return f"holdout (train={n_train}, test={n_test})"
+    return f"holdout (train={n_train}, test={n_test}, test_fraction={float(frac):.2f})"
 
 
 def _describe_error_metrics(metrics: dict[str, Any]) -> str:

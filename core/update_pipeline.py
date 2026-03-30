@@ -50,7 +50,7 @@ def refresh_material_artifacts(material_dataset: MaterialDataset, train_config: 
         material_dataset.material_model_artifacts = material_dataset.material_model_artifacts
         return material_dataset
 
-    material_artifacts = train_material_models(df, config=train_config)
+    material_artifacts = train_material_models(df, config=train_config, spec_config=material_dataset.spec_config)
     material_dataset.material_model_artifacts = material_artifacts
     return material_dataset
 

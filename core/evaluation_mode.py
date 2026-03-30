@@ -63,7 +63,7 @@ def _evaluate_single_scenario(
     if test_df.empty:
         return {"scenario": scenario.name, "error": "No test rows available after cutoff."}
 
-    artifacts = train_material_models(train_df, config=config)
+    artifacts = train_material_models(train_df, config=config, spec_config=spec_config)
     model_bundle = {
         "rs_model": artifacts.rs_model,
         "thickness_model": artifacts.thickness_model,

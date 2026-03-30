@@ -477,7 +477,11 @@ class ModelPanel(QWidget):
             return
 
         # Train per-material models using all rows (including out-of-spec).
-        artifacts = train_material_models(train_df, config=self._config)
+        artifacts = train_material_models(
+            train_df,
+            config=self._config,
+            spec_config=self._material_dataset.spec_config,
+        )
         self._last_training_artifacts = artifacts
         self._training_target_ids = tuple(selected_targets) if selected_targets else tuple(self._ordered_target_ids)
         self._material_dataset.material_model_artifacts = artifacts
@@ -503,7 +507,7 @@ class ModelPanel(QWidget):
             f"- rows: {artifacts.train_summary.get('row_count')}\n"
             f"- selected_training_targets: {list(self._training_target_ids)}\n"
             f"- target_instances: {artifacts.train_summary.get('target_instance_count')}\n"
-            "\nMetrics (time-aware holdout):\n"
+            "\nMetrics (leakage-free benchmark):\n"
             f"- rs_mae: {artifacts.metrics.get('rs_mae')}\n"
             f"- thickness_mae: {artifacts.metrics.get('thickness_mae')}\n"
             f"- rsu_mae: {artifacts.metrics.get('rsu_mae')}\n"
@@ -622,7 +626,7 @@ class ModelPanel(QWidget):
             ("Feature matrix", "ready", f"rows={len(X)}; cols={len(X.columns)}"),
             ("Target extraction", "ready", f"rs={rs_valid}, thickness={thickness_valid}, rsu={rsu_valid}"),
             ("Model fitting", "trained" if trained else "pending", "train_button required"),
-            ("Time-aware evaluation", "trained" if trained else "pending", "metrics available after training"),
+            ("Leakage-free benchmark", "trained" if trained else "pending", "metrics available after training"),
             ("Confidence synthesis", "trained" if trained else "pending", "summary available after training"),
         ]
         self._render_model_pipeline_stages(stage_rows)
@@ -800,7 +804,7 @@ class ModelPanel(QWidget):
             self.model_stage_figures["model_fitting"].tight_layout()
             canvas.draw_idle()
 
-        # 4) Time-aware evaluation diagnostics.
+        # 4) Benchmark split diagnostics.
         ax = self.model_stage_axes.get("time_aware_eval")
         canvas = self.model_stage_canvases.get("time_aware_eval")
         if ax is not None and canvas is not None:
@@ -812,9 +816,10 @@ class ModelPanel(QWidget):
                 metrics = self._last_training_artifacts.metrics or {}
                 n_train = float(metrics.get("n_train") or 0.0)
                 n_test = float(metrics.get("n_test") or 0.0)
-                frac = float(metrics.get("test_fraction") or 0.0)
+                n_folds = int(metrics.get("n_folds") or 0)
+                st = str(metrics.get("benchmark_split_type") or "forward_chaining")
                 ax.bar(["n_train", "n_test"], [n_train, n_test], color=["#4c78a8", "#f28e2b"])
-                ax.set_title(f"Time-aware split (test_fraction={frac:.2f})")
+                ax.set_title(f"Benchmark split ({st}, folds={n_folds})")
                 ax.grid(True, alpha=0.2, axis="y")
             self.model_stage_figures["time_aware_eval"].tight_layout()
             canvas.draw_idle()

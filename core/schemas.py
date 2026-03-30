@@ -51,6 +51,49 @@ class ParameterConfig:
 
 
 @dataclass
+class BenchmarkFoldResult:
+    """Per-fold metrics from a leakage-free benchmark run (one material)."""
+
+    split_name: str
+    split_type: str
+    train_row_count: int
+    test_row_count: int
+    train_target_ids: list[str]
+    test_target_ids: list[str]
+    rs_mae: Optional[float] = None
+    rs_rmse: Optional[float] = None
+    thickness_mae: Optional[float] = None
+    thickness_rmse: Optional[float] = None
+    rsu_mae: Optional[float] = None
+    rsu_rmse: Optional[float] = None
+    spec_pass_accuracy: Optional[float] = None
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class BenchmarkSummary:
+    """Aggregate statistics over benchmark folds."""
+
+    split_type: str
+    folds: list[BenchmarkFoldResult]
+    rs_mae_mean: Optional[float] = None
+    rs_mae_std: Optional[float] = None
+    rs_rmse_mean: Optional[float] = None
+    rs_rmse_std: Optional[float] = None
+    thickness_mae_mean: Optional[float] = None
+    thickness_mae_std: Optional[float] = None
+    thickness_rmse_mean: Optional[float] = None
+    thickness_rmse_std: Optional[float] = None
+    rsu_mae_mean: Optional[float] = None
+    rsu_mae_std: Optional[float] = None
+    rsu_rmse_mean: Optional[float] = None
+    rsu_rmse_std: Optional[float] = None
+    spec_pass_accuracy_mean: Optional[float] = None
+    spec_pass_accuracy_std: Optional[float] = None
+    aggregate_warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
 class MaterialModelArtifacts:
     rs_model: Any = None
     thickness_model: Any = None
