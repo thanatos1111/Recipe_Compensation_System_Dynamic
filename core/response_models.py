@@ -17,7 +17,7 @@ from sklearn.pipeline import Pipeline
 from core.feature_engineering import build_feature_matrix, get_feature_schema
 from core.labeling import apply_spec_labels
 from core.schemas import BenchmarkFoldResult, BenchmarkSummary, MaterialModelArtifacts, SpecConfig
-from core.model_registry import build_preprocessed_regression_pipeline
+from core.model_registry import ExternalModelDependencyMissingError, build_preprocessed_regression_pipeline
 from core.validation_schemes import split_strategy_to_iter
 from core.uncertainty import (
     apply_conformal_interval,
@@ -367,6 +367,7 @@ def evaluate_models_with_splits(
     for split_name, split_type, train_idx, test_idx in split_iter:
         tr = train_idx.intersection(df.index)
         te = test_idx.intersection(df.index)
+        fold_warnings: list[str] = []
         if len(tr) == 0 or len(te) == 0 or tr.intersection(te).any():
             fold_results.append(
                 BenchmarkFoldResult(
@@ -390,9 +391,29 @@ def evaluate_models_with_splits(
 
         df_proper, df_calib = _split_for_calibration(df_train)
 
-        rs_model = fit_model_for_target(df_proper, "rs", config)
-        th_model = fit_model_for_target(df_proper, "thickness", config)
-        rsu_model = fit_model_for_target(df_proper, "rsu", config)
+        try:
+            rs_model = fit_model_for_target(df_proper, "rs", config)
+        except ExternalModelDependencyMissingError as exc:
+            w = exc.user_message
+            fold_warnings.append(w)
+            warnings_global.append(w)
+            rs_model = None
+
+        try:
+            th_model = fit_model_for_target(df_proper, "thickness", config)
+        except ExternalModelDependencyMissingError as exc:
+            w = exc.user_message
+            fold_warnings.append(w)
+            warnings_global.append(w)
+            th_model = None
+
+        try:
+            rsu_model = fit_model_for_target(df_proper, "rsu", config)
+        except ExternalModelDependencyMissingError as exc:
+            w = exc.user_message
+            fold_warnings.append(w)
+            warnings_global.append(w)
+            rsu_model = None
 
         preds: dict[str, Any] = {}
         pr_rs = predict_target(rs_model, X_test)
@@ -514,7 +535,7 @@ def evaluate_models_with_splits(
                 rsu_interval_coverage=rsu_interval_coverage,
                 rsu_interval_mean_width=rsu_interval_mean_width,
                 rsu_interval_median_width=rsu_interval_median_width,
-                warnings=[],
+                warnings=fold_warnings,
             )
         )
 

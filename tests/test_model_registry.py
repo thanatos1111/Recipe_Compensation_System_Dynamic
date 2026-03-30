@@ -6,6 +6,7 @@ import pandas as pd
 from core.model_registry import (
     build_preprocessed_regression_pipeline,
     get_supported_model_specs,
+    is_model_available,
 )
 
 
@@ -33,6 +34,9 @@ class TestModelRegistry(unittest.TestCase):
 
         df, _y = self._dummy_regression_df()
         for model_name in supported.keys():
+            if not is_model_available(model_name):
+                # External model families are optional; skip fit checks when missing.
+                continue
             pipeline = build_preprocessed_regression_pipeline(
                 model_name,
                 numeric_features=numeric_features,

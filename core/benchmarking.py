@@ -20,6 +20,13 @@ MODEL_BUNDLE_PRESETS: dict[str, dict[str, str]] = {
     "baseline_tree": {"rs": "rf", "thickness": "rf", "rsu": "rf"},
     "balanced_default": {"rs": "gbr", "thickness": "gbr", "rsu": "gbr"},
     "mlp_experimental": {"rs": "mlp", "thickness": "mlp", "rsu": "mlp"},
+    # Optional external gradient boosting regressors.
+    "xgb_default": {"rs": "xgb", "thickness": "xgb", "rsu": "xgb"},
+    "lgbm_default": {"rs": "lgbm", "thickness": "lgbm", "rsu": "lgbm"},
+    "catboost_default": {"rs": "catboost", "thickness": "catboost", "rsu": "catboost"},
+    # Convenience bundle for quick comparison against `balanced_default` in one run.
+    # (UI supports bundle presets; a multi-bundle "group" is represented as a single bundle.)
+    "boosting_compare": {"rs": "xgb", "thickness": "lgbm", "rsu": "catboost"},
 }
 
 
