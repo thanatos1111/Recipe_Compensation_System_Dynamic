@@ -11,6 +11,7 @@ import pandas as pd
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -107,6 +108,7 @@ class ModelPanel(QWidget):
         self._last_benchmark_suite_results: Optional[Any] = None
         self._last_benchmark_ranked: list[dict[str, Any]] = []
         self._last_benchmark_best_bundle: Optional[str] = None
+        self._last_benchmark_uncertainty_enabled: bool = False
 
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Model and evaluation panel"))
@@ -501,6 +503,33 @@ class ModelPanel(QWidget):
         self.bench_chart_metric_combo = QComboBox()
         self.bench_chart_metric_combo.addItems(["RS MAE", "Thickness MAE", "RSU MAE", "Spec pass accuracy"])
         benchmark_form.addRow("Chart metric:", self.bench_chart_metric_combo)
+
+        # Optional uncertainty configuration (conformal interval quality).
+        self.bench_uncertainty_enabled_checkbox = QCheckBox("Enable uncertainty (conformal intervals)")
+        self.bench_uncertainty_enabled_checkbox.setChecked(False)
+
+        self.bench_uncertainty_alpha_spin = QDoubleSpinBox()
+        self.bench_uncertainty_alpha_spin.setRange(0.01, 0.5)
+        self.bench_uncertainty_alpha_spin.setDecimals(3)
+        self.bench_uncertainty_alpha_spin.setKeyboardTracking(False)
+        self.bench_uncertainty_alpha_spin.setValue(0.1)
+
+        self.bench_uncertainty_calib_frac_spin = QDoubleSpinBox()
+        self.bench_uncertainty_calib_frac_spin.setRange(0.05, 0.8)
+        self.bench_uncertainty_calib_frac_spin.setDecimals(3)
+        self.bench_uncertainty_calib_frac_spin.setKeyboardTracking(False)
+        self.bench_uncertainty_calib_frac_spin.setValue(0.2)
+
+        def _on_uncertainty_toggled(checked: bool) -> None:
+            self.bench_uncertainty_alpha_spin.setEnabled(checked)
+            self.bench_uncertainty_calib_frac_spin.setEnabled(checked)
+
+        self.bench_uncertainty_enabled_checkbox.toggled.connect(_on_uncertainty_toggled)
+        _on_uncertainty_toggled(False)
+
+        benchmark_form.addRow(self.bench_uncertainty_enabled_checkbox)
+        benchmark_form.addRow("Conformal alpha:", self.bench_uncertainty_alpha_spin)
+        benchmark_form.addRow("Calibration fraction:", self.bench_uncertainty_calib_frac_spin)
 
         action_row = QHBoxLayout()
         self.bench_run_button = QPushButton("Run benchmark")
@@ -1453,6 +1482,18 @@ class ModelPanel(QWidget):
                 "history_target_ids": tuple(bs.get("active_target_cutoff", {}).get("history_target_ids") or ()),
             }
 
+        self._last_benchmark_uncertainty_enabled = bool(self.bench_uncertainty_enabled_checkbox.isChecked())
+        if self._last_benchmark_uncertainty_enabled:
+            bs["uncertainty"] = {
+                "enabled": True,
+                "alpha": float(self.bench_uncertainty_alpha_spin.value()),
+                "calibration_fraction": float(self.bench_uncertainty_calib_frac_spin.value()),
+                # Keep the minimum small so conformal intervals work in small folds.
+                "min_calibration_rows": 5,
+            }
+        else:
+            bs.pop("uncertainty", None)
+
         bench_config["benchmark_settings"] = bs
 
         model_subset = {bn: MODEL_BUNDLE_PRESETS[bn] for bn in selected_bundles if bn in MODEL_BUNDLE_PRESETS}
@@ -1541,6 +1582,16 @@ class ModelPanel(QWidget):
             "fold_count",
             "warnings",
         ]
+        if self._last_benchmark_uncertainty_enabled:
+            headers = [
+                *headers[:],
+                "rs_interval_coverage_mean",
+                "rs_interval_mean_width_mean",
+                "thickness_interval_coverage_mean",
+                "thickness_interval_mean_width_mean",
+                "rsu_interval_coverage_mean",
+                "rsu_interval_mean_width_mean",
+            ]
 
         self.bench_summary_table.clear()
         self.bench_summary_table.setRowCount(len(rows))
@@ -1575,6 +1626,17 @@ class ModelPanel(QWidget):
             "spec_pass_accuracy",
             "warnings",
         ]
+        if self._last_benchmark_uncertainty_enabled:
+            headers = [
+                *headers[:9],
+                "rs_interval_coverage",
+                "rs_interval_mean_width",
+                "thickness_interval_coverage",
+                "thickness_interval_mean_width",
+                "rsu_interval_coverage",
+                "rsu_interval_mean_width",
+                *headers[9:],
+            ]
 
         self.bench_fold_table.clear()
         self.bench_fold_table.setRowCount(len(rows))
@@ -1669,6 +1731,30 @@ class ModelPanel(QWidget):
             if avg_test < 5:
                 lines.append("")
                 lines.append(f"Confidence may be low: avg test rows per fold = {avg_test:.2f} (small holdout).")
+
+        if self._last_benchmark_uncertainty_enabled:
+            def _fmt(v: Optional[float]) -> str:
+                if v is None:
+                    return "-"
+                return f"{float(v):.3f}"
+
+            lines.append("")
+            lines.append("Interval quality (conformal):")
+            lines.append(
+                f"- RS: coverage={_fmt(best_run.summary.rs_interval_coverage_mean)}; "
+                f"mean width={_fmt(best_run.summary.rs_interval_mean_width_mean)}; "
+                f"median width={_fmt(best_run.summary.rs_interval_median_width_mean)}"
+            )
+            lines.append(
+                f"- Thickness: coverage={_fmt(best_run.summary.thickness_interval_coverage_mean)}; "
+                f"mean width={_fmt(best_run.summary.thickness_interval_mean_width_mean)}; "
+                f"median width={_fmt(best_run.summary.thickness_interval_median_width_mean)}"
+            )
+            lines.append(
+                f"- RSU: coverage={_fmt(best_run.summary.rsu_interval_coverage_mean)}; "
+                f"mean width={_fmt(best_run.summary.rsu_interval_mean_width_mean)}; "
+                f"median width={_fmt(best_run.summary.rsu_interval_median_width_mean)}"
+            )
 
         all_warnings: list[str] = []
         for f in best_run.summary.folds:

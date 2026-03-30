@@ -19,6 +19,11 @@ from core.labeling import apply_spec_labels
 from core.schemas import BenchmarkFoldResult, BenchmarkSummary, MaterialModelArtifacts, SpecConfig
 from core.model_registry import build_preprocessed_regression_pipeline
 from core.validation_schemes import split_strategy_to_iter
+from core.uncertainty import (
+    apply_conformal_interval,
+    evaluate_interval_quality,
+    fit_residual_conformal_calibrator,
+)
 
 
 def _model_name_for_target(target_col: str, config: dict[str, Any]) -> str:
@@ -210,6 +215,16 @@ def _aggregate_folds(
         "rsu_mae",
         "rsu_rmse",
         "spec_pass_accuracy",
+        # Conformal interval quality (optional; may be None when disabled).
+        "rs_interval_coverage",
+        "rs_interval_mean_width",
+        "rs_interval_median_width",
+        "thickness_interval_coverage",
+        "thickness_interval_mean_width",
+        "thickness_interval_median_width",
+        "rsu_interval_coverage",
+        "rsu_interval_mean_width",
+        "rsu_interval_median_width",
     ]
     agg: dict[str, tuple[Optional[float], Optional[float]]] = {}
     for k in keys:
@@ -234,6 +249,27 @@ def _aggregate_folds(
         rsu_rmse_std=agg["rsu_rmse"][1],
         spec_pass_accuracy_mean=agg["spec_pass_accuracy"][0],
         spec_pass_accuracy_std=agg["spec_pass_accuracy"][1],
+
+        rs_interval_coverage_mean=agg["rs_interval_coverage"][0],
+        rs_interval_coverage_std=agg["rs_interval_coverage"][1],
+        rs_interval_mean_width_mean=agg["rs_interval_mean_width"][0],
+        rs_interval_mean_width_std=agg["rs_interval_mean_width"][1],
+        rs_interval_median_width_mean=agg["rs_interval_median_width"][0],
+        rs_interval_median_width_std=agg["rs_interval_median_width"][1],
+
+        thickness_interval_coverage_mean=agg["thickness_interval_coverage"][0],
+        thickness_interval_coverage_std=agg["thickness_interval_coverage"][1],
+        thickness_interval_mean_width_mean=agg["thickness_interval_mean_width"][0],
+        thickness_interval_mean_width_std=agg["thickness_interval_mean_width"][1],
+        thickness_interval_median_width_mean=agg["thickness_interval_median_width"][0],
+        thickness_interval_median_width_std=agg["thickness_interval_median_width"][1],
+
+        rsu_interval_coverage_mean=agg["rsu_interval_coverage"][0],
+        rsu_interval_coverage_std=agg["rsu_interval_coverage"][1],
+        rsu_interval_mean_width_mean=agg["rsu_interval_mean_width"][0],
+        rsu_interval_mean_width_std=agg["rsu_interval_mean_width"][1],
+        rsu_interval_median_width_mean=agg["rsu_interval_median_width"][0],
+        rsu_interval_median_width_std=agg["rsu_interval_median_width"][1],
     )
 
 
@@ -269,6 +305,13 @@ def evaluate_models_with_splits(
     else:
         extra = dict(bs.get("forward_chaining", {}) or {})
 
+    # Optional uncertainty configuration (model-agnostic conformal intervals).
+    unc_cfg = bs.get("uncertainty") or {}
+    unc_enabled = bool(unc_cfg.get("enabled", False))
+    unc_alpha = float(unc_cfg.get("alpha", 0.1))
+    unc_calibration_fraction = float(unc_cfg.get("calibration_fraction", 0.2))
+    unc_min_calibration_rows = int(unc_cfg.get("min_calibration_rows", 10))
+
     fold_results: list[BenchmarkFoldResult] = []
     warnings_global: list[str] = []
 
@@ -284,6 +327,42 @@ def evaluate_models_with_splits(
         "thickness": _model_name_for_target("thickness", config),
         "rsu": _model_name_for_target("rsu", config),
     }
+
+    def _split_for_calibration(
+        df_train_in: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+        if not unc_enabled:
+            return df_train_in, None
+        if df_train_in is None or df_train_in.empty:
+            return df_train_in, None
+
+        n = int(len(df_train_in))
+        if n < 2:
+            return df_train_in, None
+
+        cal_size = int(np.floor(n * unc_calibration_fraction))
+        if cal_size < unc_min_calibration_rows:
+            cal_size = unc_min_calibration_rows
+        if cal_size <= 0 or cal_size >= n:
+            return df_train_in, None
+
+        # To better respect time ordering, calibrate on the "tail" of the
+        # fold sorted by lifetime when available.
+        df_sorted = df_train_in
+        if "lifetime" in df_train_in.columns:
+            try:
+                df_sorted = df_train_in.sort_values("lifetime")
+            except Exception:
+                df_sorted = df_train_in
+
+        df_calib = df_sorted.iloc[-cal_size:]
+        df_proper = df_sorted.iloc[: n - cal_size]
+
+        # Fit_model_for_target requires at least 10 valid rows; keep a small guard.
+        if len(df_proper) < 10:
+            return df_train_in, None
+
+        return df_proper, df_calib
 
     for split_name, split_type, train_idx, test_idx in split_iter:
         tr = train_idx.intersection(df.index)
@@ -309,9 +388,11 @@ def evaluate_models_with_splits(
         df_test = df.loc[te]
         X_test = build_feature_matrix(df_test, feature_config)
 
-        rs_model = fit_model_for_target(df_train, "rs", config)
-        th_model = fit_model_for_target(df_train, "thickness", config)
-        rsu_model = fit_model_for_target(df_train, "rsu", config)
+        df_proper, df_calib = _split_for_calibration(df_train)
+
+        rs_model = fit_model_for_target(df_proper, "rs", config)
+        th_model = fit_model_for_target(df_proper, "thickness", config)
+        rsu_model = fit_model_for_target(df_proper, "rsu", config)
 
         preds: dict[str, Any] = {}
         pr_rs = predict_target(rs_model, X_test)
@@ -329,6 +410,69 @@ def evaluate_models_with_splits(
             dtype=float
         )
         y_rsu = pd.to_numeric(df_test["rsu"], errors="coerce") if "rsu" in df_test.columns else pd.Series(dtype=float)
+
+        # Uncertainty (interval quality) defaults.
+        rs_interval_coverage: Optional[float] = None
+        rs_interval_mean_width: Optional[float] = None
+        rs_interval_median_width: Optional[float] = None
+
+        thickness_interval_coverage: Optional[float] = None
+        thickness_interval_mean_width: Optional[float] = None
+        thickness_interval_median_width: Optional[float] = None
+
+        rsu_interval_coverage: Optional[float] = None
+        rsu_interval_mean_width: Optional[float] = None
+        rsu_interval_median_width: Optional[float] = None
+
+        if unc_enabled and df_calib is not None and not df_calib.empty:
+            X_calib = build_feature_matrix(df_calib, feature_config)
+
+            # RS
+            if "rs" in df_calib.columns and pr_rs is not None and rs_model is not None and X_calib is not None:
+                pr_rs_cal = predict_target(rs_model, X_calib)
+                if pr_rs_cal is not None:
+                    y_rs_cal = pd.to_numeric(df_calib["rs"], errors="coerce")
+                    y_pred_rs_cal = pd.Series(np.asarray(pr_rs_cal, dtype=float), index=df_calib.index)
+                    calib = fit_residual_conformal_calibrator(y_rs_cal, y_pred_rs_cal, alpha=unc_alpha)
+                    y_pred_rs_test = pd.Series(np.asarray(pr_rs, dtype=float), index=df_test.index)
+                    intervals = apply_conformal_interval(y_pred_rs_test, calib)
+                    q = evaluate_interval_quality(y_rs, intervals["lower"], intervals["upper"])
+                    rs_interval_coverage = q["coverage"]
+                    rs_interval_mean_width = q["mean_interval_width"]
+                    rs_interval_median_width = q["median_interval_width"]
+
+            # Thickness
+            if (
+                "thickness" in df_calib.columns
+                and pr_th is not None
+                and th_model is not None
+                and X_calib is not None
+            ):
+                pr_th_cal = predict_target(th_model, X_calib)
+                if pr_th_cal is not None:
+                    y_th_cal = pd.to_numeric(df_calib["thickness"], errors="coerce")
+                    y_pred_th_cal = pd.Series(np.asarray(pr_th_cal, dtype=float), index=df_calib.index)
+                    calib = fit_residual_conformal_calibrator(y_th_cal, y_pred_th_cal, alpha=unc_alpha)
+                    y_pred_th_test = pd.Series(np.asarray(pr_th, dtype=float), index=df_test.index)
+                    intervals = apply_conformal_interval(y_pred_th_test, calib)
+                    q = evaluate_interval_quality(y_th, intervals["lower"], intervals["upper"])
+                    thickness_interval_coverage = q["coverage"]
+                    thickness_interval_mean_width = q["mean_interval_width"]
+                    thickness_interval_median_width = q["median_interval_width"]
+
+            # RSU
+            if "rsu" in df_calib.columns and pr_rsu is not None and rsu_model is not None and X_calib is not None:
+                pr_rsu_cal = predict_target(rsu_model, X_calib)
+                if pr_rsu_cal is not None:
+                    y_rsu_cal = pd.to_numeric(df_calib["rsu"], errors="coerce")
+                    y_pred_rsu_cal = pd.Series(np.asarray(pr_rsu_cal, dtype=float), index=df_calib.index)
+                    calib = fit_residual_conformal_calibrator(y_rsu_cal, y_pred_rsu_cal, alpha=unc_alpha)
+                    y_pred_rsu_test = pd.Series(np.asarray(pr_rsu, dtype=float), index=df_test.index)
+                    intervals = apply_conformal_interval(y_pred_rsu_test, calib)
+                    q = evaluate_interval_quality(y_rsu, intervals["lower"], intervals["upper"])
+                    rsu_interval_coverage = q["coverage"]
+                    rsu_interval_mean_width = q["mean_interval_width"]
+                    rsu_interval_median_width = q["median_interval_width"]
 
         rs_mae, rs_rmse = _regression_mae_rmse(y_rs, pr_rs)
         th_mae, th_rmse = _regression_mae_rmse(y_th, pr_th)
@@ -360,6 +504,16 @@ def evaluate_models_with_splits(
                 rs_model_name=model_names["rs"],
                 thickness_model_name=model_names["thickness"],
                 rsu_model_name=model_names["rsu"],
+
+                rs_interval_coverage=rs_interval_coverage,
+                rs_interval_mean_width=rs_interval_mean_width,
+                rs_interval_median_width=rs_interval_median_width,
+                thickness_interval_coverage=thickness_interval_coverage,
+                thickness_interval_mean_width=thickness_interval_mean_width,
+                thickness_interval_median_width=thickness_interval_median_width,
+                rsu_interval_coverage=rsu_interval_coverage,
+                rsu_interval_mean_width=rsu_interval_mean_width,
+                rsu_interval_median_width=rsu_interval_median_width,
                 warnings=[],
             )
         )

@@ -132,6 +132,7 @@ class RecommendationPanel(QWidget):
         self.comparison_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.comparison_table.horizontalHeader().setStretchLastSection(True)
         self.comparison_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.comparison_table.setMinimumHeight(260)
         table_layout.addWidget(self.comparison_table)
         table_layout.setStretchFactor(self.comparison_table, 1)
         table_view.setLayout(table_layout)
@@ -146,7 +147,7 @@ class RecommendationPanel(QWidget):
         if FigureCanvas is not None:
             self.canvas = FigureCanvas(self.figure)
             # Keep canvas responsive so the bottom pane doesn't get pushed off-screen.
-            self.canvas.setMinimumHeight(200)
+            self.canvas.setMinimumHeight(230)
             self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             plot_layout.addWidget(self.canvas)
             plot_layout.setStretchFactor(self.canvas, 1)
@@ -163,6 +164,7 @@ class RecommendationPanel(QWidget):
         # container so content doesn't overflow the tab on small windows.
         comparison_views_scroll = QScrollArea()
         comparison_views_scroll.setWidgetResizable(True)
+        comparison_views_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         comparison_views_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         comparison_views_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         comparison_views_scroll.setWidget(comparison_views_tabs)

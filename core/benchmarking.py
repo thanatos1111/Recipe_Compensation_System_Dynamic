@@ -78,6 +78,29 @@ def _rebuild_benchmark_summary(evaluate_out: dict[str, Any]) -> BenchmarkSummary
         rsu_rmse_std=summary_dict.get("rsu_rmse_std"),
         spec_pass_accuracy_mean=summary_dict.get("spec_pass_accuracy_mean"),
         spec_pass_accuracy_std=summary_dict.get("spec_pass_accuracy_std"),
+
+        # Optional conformal interval quality metrics (aggregated across folds).
+        rs_interval_coverage_mean=summary_dict.get("rs_interval_coverage_mean"),
+        rs_interval_coverage_std=summary_dict.get("rs_interval_coverage_std"),
+        rs_interval_mean_width_mean=summary_dict.get("rs_interval_mean_width_mean"),
+        rs_interval_mean_width_std=summary_dict.get("rs_interval_mean_width_std"),
+        rs_interval_median_width_mean=summary_dict.get("rs_interval_median_width_mean"),
+        rs_interval_median_width_std=summary_dict.get("rs_interval_median_width_std"),
+
+        thickness_interval_coverage_mean=summary_dict.get("thickness_interval_coverage_mean"),
+        thickness_interval_coverage_std=summary_dict.get("thickness_interval_coverage_std"),
+        thickness_interval_mean_width_mean=summary_dict.get("thickness_interval_mean_width_mean"),
+        thickness_interval_mean_width_std=summary_dict.get("thickness_interval_mean_width_std"),
+        thickness_interval_median_width_mean=summary_dict.get("thickness_interval_median_width_mean"),
+        thickness_interval_median_width_std=summary_dict.get("thickness_interval_median_width_std"),
+
+        rsu_interval_coverage_mean=summary_dict.get("rsu_interval_coverage_mean"),
+        rsu_interval_coverage_std=summary_dict.get("rsu_interval_coverage_std"),
+        rsu_interval_mean_width_mean=summary_dict.get("rsu_interval_mean_width_mean"),
+        rsu_interval_mean_width_std=summary_dict.get("rsu_interval_mean_width_std"),
+        rsu_interval_median_width_mean=summary_dict.get("rsu_interval_median_width_mean"),
+        rsu_interval_median_width_std=summary_dict.get("rsu_interval_median_width_std"),
+
         aggregate_warnings=summary_dict.get("aggregate_warnings") or [],
     )
 
@@ -157,6 +180,18 @@ class BenchmarkSuiteResult:
                     "rsu_rmse_std": run.summary.rsu_rmse_std,
                     "spec_pass_accuracy_mean": run.summary.spec_pass_accuracy_mean,
                     "spec_pass_accuracy_std": run.summary.spec_pass_accuracy_std,
+
+                    # Uncertainty interval quality (aggregated across folds).
+                    "rs_interval_coverage_mean": run.summary.rs_interval_coverage_mean,
+                    "rs_interval_mean_width_mean": run.summary.rs_interval_mean_width_mean,
+                    "rs_interval_median_width_mean": run.summary.rs_interval_median_width_mean,
+                    "thickness_interval_coverage_mean": run.summary.thickness_interval_coverage_mean,
+                    "thickness_interval_mean_width_mean": run.summary.thickness_interval_mean_width_mean,
+                    "thickness_interval_median_width_mean": run.summary.thickness_interval_median_width_mean,
+                    "rsu_interval_coverage_mean": run.summary.rsu_interval_coverage_mean,
+                    "rsu_interval_mean_width_mean": run.summary.rsu_interval_mean_width_mean,
+                    "rsu_interval_median_width_mean": run.summary.rsu_interval_median_width_mean,
+
                     "warnings": list(run.summary.aggregate_warnings or []) + [w for f in run.summary.folds for w in (f.warnings or [])],
                 }
             )
@@ -278,6 +313,18 @@ def flatten_benchmark_suite_folds(results: BenchmarkSuiteResult) -> list[dict[st
                     "rsu_mae": fold.rsu_mae,
                     "rsu_rmse": fold.rsu_rmse,
                     "spec_pass_accuracy": fold.spec_pass_accuracy,
+
+                    # Uncertainty interval quality (per-fold).
+                    "rs_interval_coverage": fold.rs_interval_coverage,
+                    "rs_interval_mean_width": fold.rs_interval_mean_width,
+                    "rs_interval_median_width": fold.rs_interval_median_width,
+                    "thickness_interval_coverage": fold.thickness_interval_coverage,
+                    "thickness_interval_mean_width": fold.thickness_interval_mean_width,
+                    "thickness_interval_median_width": fold.thickness_interval_median_width,
+                    "rsu_interval_coverage": fold.rsu_interval_coverage,
+                    "rsu_interval_mean_width": fold.rsu_interval_mean_width,
+                    "rsu_interval_median_width": fold.rsu_interval_median_width,
+
                     "warnings": ";".join(fold.warnings or []),
                 }
             )

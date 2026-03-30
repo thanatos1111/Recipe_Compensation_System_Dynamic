@@ -70,6 +70,21 @@ class BenchmarkFoldResult:
     rs_model_name: Optional[str] = None
     thickness_model_name: Optional[str] = None
     rsu_model_name: Optional[str] = None
+
+    # Optional conformal interval quality metrics (model-agnostic uncertainty).
+    # These are computed on the fold's test set using a per-fold calibration split.
+    rs_interval_coverage: Optional[float] = None
+    rs_interval_mean_width: Optional[float] = None
+    rs_interval_median_width: Optional[float] = None
+
+    thickness_interval_coverage: Optional[float] = None
+    thickness_interval_mean_width: Optional[float] = None
+    thickness_interval_median_width: Optional[float] = None
+
+    rsu_interval_coverage: Optional[float] = None
+    rsu_interval_mean_width: Optional[float] = None
+    rsu_interval_median_width: Optional[float] = None
+
     warnings: list[str] = field(default_factory=list)
 
 
@@ -94,6 +109,29 @@ class BenchmarkSummary:
     rsu_rmse_std: Optional[float] = None
     spec_pass_accuracy_mean: Optional[float] = None
     spec_pass_accuracy_std: Optional[float] = None
+
+    # Optional conformal interval quality metrics (mean/std across folds).
+    rs_interval_coverage_mean: Optional[float] = None
+    rs_interval_coverage_std: Optional[float] = None
+    rs_interval_mean_width_mean: Optional[float] = None
+    rs_interval_mean_width_std: Optional[float] = None
+    rs_interval_median_width_mean: Optional[float] = None
+    rs_interval_median_width_std: Optional[float] = None
+
+    thickness_interval_coverage_mean: Optional[float] = None
+    thickness_interval_coverage_std: Optional[float] = None
+    thickness_interval_mean_width_mean: Optional[float] = None
+    thickness_interval_mean_width_std: Optional[float] = None
+    thickness_interval_median_width_mean: Optional[float] = None
+    thickness_interval_median_width_std: Optional[float] = None
+
+    rsu_interval_coverage_mean: Optional[float] = None
+    rsu_interval_coverage_std: Optional[float] = None
+    rsu_interval_mean_width_mean: Optional[float] = None
+    rsu_interval_mean_width_std: Optional[float] = None
+    rsu_interval_median_width_mean: Optional[float] = None
+    rsu_interval_median_width_std: Optional[float] = None
+
     aggregate_warnings: list[str] = field(default_factory=list)
 
 
