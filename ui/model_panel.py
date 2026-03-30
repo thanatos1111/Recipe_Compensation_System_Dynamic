@@ -17,9 +17,11 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHeaderView,
     QHBoxLayout,
+    QFileDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QScrollArea,
     QPushButton,
     QSplitter,
     QSizePolicy,
@@ -37,6 +39,12 @@ from core.feature_engineering import build_feature_matrix, get_feature_schema
 from core.instance_correction import fit_instance_bias, summarize_recent_residuals
 from core.model_explanations import TrainingExplanation, build_training_explanation
 from core.pipeline_inspection import build_processing_view_data
+from core.benchmarking import (
+    MODEL_BUNDLE_PRESETS,
+    flatten_benchmark_suite_folds,
+    rank_benchmark_results,
+    run_prediction_benchmark,
+)
 from core.response_models import train_material_models
 from core.schemas import MaterialDataset
 
@@ -96,6 +104,9 @@ class ModelPanel(QWidget):
         self._training_target_ids: tuple[str, ...] = ()
         self._model_plot_hover_items: dict[str, list[tuple[Any, float, float, str]]] = {"rs": [], "thickness": [], "rsu": []}
         self._cutoff_by_target: dict[str, float] = {}
+        self._last_benchmark_suite_results: Optional[Any] = None
+        self._last_benchmark_ranked: list[dict[str, Any]] = []
+        self._last_benchmark_best_bundle: Optional[str] = None
 
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Model and evaluation panel"))
@@ -438,6 +449,124 @@ class ModelPanel(QWidget):
         eval_page.setLayout(eval_layout)
         self.section_tabs.addTab(eval_page, "4) Scenario Evaluation")
 
+        # Section 5: benchmark runner.
+        benchmark_page = QWidget()
+        benchmark_page_layout = QVBoxLayout()
+
+        # The benchmark content can be tall (controls + tables + chart + text),
+        # so wrap it in a scroll area to avoid out-of-screen overlap.
+        benchmark_scroll = QScrollArea()
+        benchmark_scroll.setWidgetResizable(True)
+        benchmark_content = QWidget()
+        benchmark_layout = QVBoxLayout()
+        benchmark_content.setLayout(benchmark_layout)
+        benchmark_scroll.setWidget(benchmark_content)
+        benchmark_page_layout.addWidget(benchmark_scroll)
+
+        benchmark_controls_box = QGroupBox("Benchmark setup")
+        benchmark_form = QFormLayout()
+        benchmark_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        benchmark_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        benchmark_form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+
+        self.bench_split_mode_combo = QComboBox()
+        self.bench_split_mode_combo.addItems(["forward_chaining", "leave_one_target_out", "active_target_cutoff"])
+        self.bench_split_mode_combo.currentTextChanged.connect(self._on_benchmark_split_mode_changed)
+        benchmark_form.addRow("Split mode:", self.bench_split_mode_combo)
+
+        self.bench_bundle_list = QListWidget()
+        self.bench_bundle_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        for bundle_name in MODEL_BUNDLE_PRESETS.keys():
+            self.bench_bundle_list.addItem(QListWidgetItem(bundle_name))
+        self.bench_bundle_list.setMinimumHeight(90)
+        benchmark_form.addRow("Model bundles:", self.bench_bundle_list)
+
+        # Active-target parameters (only visible for active_target_cutoff split mode).
+        self.bench_active_cutoff_box = QWidget()
+        active_cutoff_layout = QHBoxLayout()
+        self.bench_active_target_combo = QComboBox()
+        self.bench_cutoff_spin = QDoubleSpinBox()
+        self.bench_cutoff_spin.setRange(0.0, 1e9)
+        self.bench_cutoff_spin.setDecimals(6)
+        self.bench_cutoff_spin.setKeyboardTracking(False)
+        self.bench_cutoff_spin.setValue(0.0)
+        active_cutoff_layout.addWidget(QLabel("Active target:"))
+        active_cutoff_layout.addWidget(self.bench_active_target_combo)
+        active_cutoff_layout.addSpacing(12)
+        active_cutoff_layout.addWidget(QLabel("Cutoff:"))
+        active_cutoff_layout.addWidget(self.bench_cutoff_spin)
+        self.bench_active_cutoff_box.setLayout(active_cutoff_layout)
+        benchmark_form.addRow("Active cutoff params:", self.bench_active_cutoff_box)
+
+        self.bench_chart_metric_combo = QComboBox()
+        self.bench_chart_metric_combo.addItems(["RS MAE", "Thickness MAE", "RSU MAE", "Spec pass accuracy"])
+        benchmark_form.addRow("Chart metric:", self.bench_chart_metric_combo)
+
+        action_row = QHBoxLayout()
+        self.bench_run_button = QPushButton("Run benchmark")
+        self.bench_run_button.clicked.connect(self._benchmark_run_clicked)
+        self.bench_status_label = QLabel("")
+        action_row.addWidget(self.bench_run_button)
+        action_row.addWidget(self.bench_status_label)
+        action_row.addStretch(1)
+
+        benchmark_export_row = QHBoxLayout()
+        self.bench_export_summary_button = QPushButton("Export summary CSV")
+        self.bench_export_summary_button.clicked.connect(self._benchmark_export_summary_csv)
+        self.bench_export_folds_button = QPushButton("Export folds CSV")
+        self.bench_export_folds_button.clicked.connect(self._benchmark_export_folds_csv)
+        benchmark_export_row.addWidget(self.bench_export_summary_button)
+        benchmark_export_row.addWidget(self.bench_export_folds_button)
+
+        action_row2 = QHBoxLayout()
+        self.bench_adopt_winner_button = QPushButton("Adopt winner models (no retrain)")
+        self.bench_adopt_winner_button.clicked.connect(self._benchmark_adopt_winner_clicked)
+        action_row2.addWidget(self.bench_adopt_winner_button)
+        action_row2.addStretch(1)
+
+        benchmark_form.addRow(action_row)
+        benchmark_form.addRow(benchmark_export_row)
+        benchmark_form.addRow(action_row2)
+
+        benchmark_controls_box.setLayout(benchmark_form)
+        benchmark_layout.addWidget(benchmark_controls_box)
+
+        self.bench_summary_table = QTableWidget()
+        self.bench_summary_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.bench_summary_table.setMinimumHeight(120)
+        benchmark_layout.addWidget(self.bench_summary_table)
+
+        self.bench_fold_table = QTableWidget()
+        self.bench_fold_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.bench_fold_table.setMinimumHeight(180)
+        benchmark_layout.addWidget(self.bench_fold_table)
+
+        bench_bottom_split = QSplitter()
+        bench_bottom_split.setOrientation(Qt.Orientation.Horizontal)
+
+        chart_widget = QWidget()
+        chart_layout = QVBoxLayout()
+        self.bench_fig = Figure(figsize=(6, 4))
+        self.bench_ax = self.bench_fig.add_subplot(111)
+        if FigureCanvas is not None:
+            self.bench_canvas = FigureCanvas(self.bench_fig)
+            self.bench_canvas.setMinimumHeight(220)
+            chart_layout.addWidget(self.bench_canvas)
+        else:
+            self.bench_canvas = None
+        chart_widget.setLayout(chart_layout)
+        bench_bottom_split.addWidget(chart_widget)
+
+        self.bench_best_explanation = QTextEdit()
+        self.bench_best_explanation.setReadOnly(True)
+        bench_bottom_split.addWidget(self.bench_best_explanation)
+        bench_bottom_split.setSizes([420, 420])
+
+        benchmark_layout.addWidget(bench_bottom_split)
+        benchmark_page.setLayout(benchmark_page_layout)
+        self.section_tabs.addTab(benchmark_page, "5) Benchmark")
+        self._on_benchmark_split_mode_changed(self.bench_split_mode_combo.currentText())
+
         self.setLayout(layout)
 
     def set_context(self, material_dataset: MaterialDataset, *, active_target_id: str, config: dict[str, Any]) -> None:
@@ -457,6 +586,7 @@ class ModelPanel(QWidget):
         self._refresh_training_explanation()
         self._refresh_processing_view()
         self._refresh_model_pipeline_view()
+        self._refresh_benchmark_active_target_combo(active_target_id=active_target_id, target_ids=target_ids)
 
     def _train_clicked(self) -> None:
         if self._material_dataset is None:
@@ -1249,6 +1379,310 @@ class ModelPanel(QWidget):
         )
 
         self._start_eval_worker(df, scenario_a, scenario_b)
+
+    def _refresh_benchmark_active_target_combo(
+        self, *, active_target_id: str, target_ids: list[str]
+    ) -> None:
+        if self._material_dataset is None:
+            return
+        if not hasattr(self, "bench_active_target_combo"):
+            return
+        self.bench_active_target_combo.blockSignals(True)
+        self.bench_active_target_combo.clear()
+        for tid in target_ids:
+            self.bench_active_target_combo.addItem(tid)
+        if active_target_id and active_target_id in target_ids:
+            self.bench_active_target_combo.setCurrentText(active_target_id)
+        self.bench_active_target_combo.blockSignals(False)
+
+        # Reuse cutoff entered on the Scenario Evaluation panel for consistency.
+        if active_target_id and active_target_id in self._cutoff_by_target:
+            self.bench_cutoff_spin.setValue(float(self._cutoff_by_target[active_target_id]))
+
+    def _on_benchmark_split_mode_changed(self, split_mode: str) -> None:
+        is_active_cutoff = str(split_mode).strip() == "active_target_cutoff"
+        self.bench_active_cutoff_box.setVisible(is_active_cutoff)
+
+    def _benchmark_run_clicked(self) -> None:
+        if self._material_dataset is None:
+            self.bench_status_label.setText("No material selected.")
+            return
+
+        df_all = self._material_dataset.all_records
+        if df_all is None or df_all.empty:
+            self.bench_status_label.setText("No rows available for benchmarking.")
+            return
+
+        selected_targets = self._selected_targets_from_widget(self.training_targets_list)
+        if selected_targets:
+            df = df_all[df_all["target_id"].astype(str).isin(selected_targets)].copy()
+        else:
+            df = df_all
+
+        if df is None or df.empty:
+            self.bench_status_label.setText("No rows available after target filtering.")
+            return
+
+        selected_bundles = self._selected_targets_from_widget(self.bench_bundle_list)
+        if not selected_bundles:
+            self.bench_status_label.setText("Select at least one model bundle.")
+            return
+
+        split_mode = self.bench_split_mode_combo.currentText().strip()
+
+        # Assemble a benchmark config without mutating deployment config.
+        bench_config = dict(self._config)
+        bench_config["spec_config"] = self._material_dataset.spec_config
+        bs = dict(bench_config.get("benchmark_settings") or {})
+
+        # Ensure chosen mode has at least reasonable defaults.
+        if split_mode == "forward_chaining":
+            bs.setdefault("forward_chaining", {"n_splits": 1, "min_train_rows": 10, "min_test_rows": 4})
+        elif split_mode == "leave_one_target_out":
+            bs.setdefault("leave_one_target_out", {"min_train_rows": 10, "min_test_rows": 3})
+        elif split_mode == "active_target_cutoff":
+            bs.setdefault("active_target_cutoff", {})
+
+            active_target_id = self.bench_active_target_combo.currentText().strip()
+            cutoff_lifetime = float(self.bench_cutoff_spin.value())
+            bs["active_target_cutoff"] = {
+                **dict(bs.get("active_target_cutoff") or {}),
+                "active_target_id": active_target_id,
+                "cutoff_lifetime": cutoff_lifetime,
+                # Benchmark runner supports future selection of history targets; keep empty for now.
+                "history_target_ids": tuple(bs.get("active_target_cutoff", {}).get("history_target_ids") or ()),
+            }
+
+        bench_config["benchmark_settings"] = bs
+
+        model_subset = {bn: MODEL_BUNDLE_PRESETS[bn] for bn in selected_bundles if bn in MODEL_BUNDLE_PRESETS}
+        if not model_subset:
+            self.bench_status_label.setText("No valid model bundles selected.")
+            return
+
+        self.bench_status_label.setText("Running benchmark...")
+        self.bench_run_button.setEnabled(False)
+        try:
+            suite = run_prediction_benchmark(
+                df,
+                config=bench_config,
+                model_names_by_target=model_subset,
+                split_modes=[split_mode],
+            )
+        except Exception as exc:
+            self.bench_status_label.setText("Benchmark failed.")
+            self.bench_best_explanation.setPlainText(f"Benchmark error: {exc}")
+            self.bench_run_button.setEnabled(True)
+            return
+        self.bench_run_button.setEnabled(True)
+
+        self._last_benchmark_suite_results = suite
+        ranked = rank_benchmark_results(suite, primary_metric="spec_pass_accuracy", secondary_metric="rs_mae")
+        self._last_benchmark_ranked = ranked
+        self._last_benchmark_best_bundle = ranked[0]["bundle_name"] if ranked else None
+
+        self._render_benchmark_summary_table(suite)
+        self._render_benchmark_fold_table(suite)
+        self._render_benchmark_chart(suite)
+        self._render_benchmark_best_explanation(suite, ranked)
+
+        self.bench_status_label.setText("Completed.")
+
+    def _benchmark_export_summary_csv(self) -> None:
+        if self._last_benchmark_suite_results is None:
+            return
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save benchmark summary CSV", "benchmark_summary.csv", "CSV Files (*.csv)"
+        )
+        if not out_path:
+            return
+        rows = self._last_benchmark_suite_results.to_table_rows()
+        pd.DataFrame(rows).to_csv(out_path, index=False)
+
+    def _benchmark_export_folds_csv(self) -> None:
+        if self._last_benchmark_suite_results is None:
+            return
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save benchmark folds CSV", "benchmark_folds.csv", "CSV Files (*.csv)"
+        )
+        if not out_path:
+            return
+        rows = flatten_benchmark_suite_folds(self._last_benchmark_suite_results)
+        pd.DataFrame(rows).to_csv(out_path, index=False)
+
+    def _benchmark_adopt_winner_clicked(self) -> None:
+        if self._last_benchmark_suite_results is None or not self._last_benchmark_best_bundle:
+            self.bench_status_label.setText("Run benchmark first to adopt a winner.")
+            return
+
+        winner = self._last_benchmark_best_bundle
+        preset = MODEL_BUNDLE_PRESETS.get(winner)
+        if not preset:
+            self.bench_status_label.setText("Winner preset not found.")
+            return
+
+        ms = dict(self._config.get("model_settings") or {})
+        ms["rs_model"] = preset["rs"]
+        ms["thickness_model"] = preset["thickness"]
+        ms["rsu_model"] = preset["rsu"]
+        self._config["model_settings"] = ms
+
+        self.bench_status_label.setText(f"Winner adopted: {winner}. Click Train to retrain.")
+
+    def _render_benchmark_summary_table(self, suite: Any) -> None:
+        rows = suite.to_table_rows()
+        headers = [
+            "bundle_name",
+            "split_mode",
+            "rs_mae_mean",
+            "thickness_mae_mean",
+            "rsu_mae_mean",
+            "spec_pass_accuracy_mean",
+            "fold_count",
+            "warnings",
+        ]
+
+        self.bench_summary_table.clear()
+        self.bench_summary_table.setRowCount(len(rows))
+        self.bench_summary_table.setColumnCount(len(headers))
+        for ci, h in enumerate(headers):
+            self.bench_summary_table.setHorizontalHeaderItem(ci, QTableWidgetItem(h))
+
+        for ri, row in enumerate(rows):
+            for ci, h in enumerate(headers):
+                val = row.get(h)
+                if isinstance(val, list):
+                    sval = ";".join(str(x) for x in val)
+                elif val is None:
+                    sval = "-"
+                else:
+                    sval = f"{float(val):.6g}" if isinstance(val, (int, float)) else str(val)
+                self.bench_summary_table.setItem(ri, ci, QTableWidgetItem(sval))
+
+        self.bench_summary_table.resizeRowsToContents()
+
+    def _render_benchmark_fold_table(self, suite: Any) -> None:
+        rows = flatten_benchmark_suite_folds(suite)
+        headers = [
+            "bundle_name",
+            "split_mode",
+            "split_name",
+            "train_row_count",
+            "test_row_count",
+            "rs_mae",
+            "thickness_mae",
+            "rsu_mae",
+            "spec_pass_accuracy",
+            "warnings",
+        ]
+
+        self.bench_fold_table.clear()
+        self.bench_fold_table.setRowCount(len(rows))
+        self.bench_fold_table.setColumnCount(len(headers))
+        for ci, h in enumerate(headers):
+            self.bench_fold_table.setHorizontalHeaderItem(ci, QTableWidgetItem(h))
+
+        def fmt(v: Any) -> str:
+            if v is None:
+                return "-"
+            if isinstance(v, (int, float)):
+                return f"{float(v):.6g}"
+            return str(v)
+
+        for ri, row in enumerate(rows):
+            for ci, h in enumerate(headers):
+                self.bench_fold_table.setItem(ri, ci, QTableWidgetItem(fmt(row.get(h))))
+
+        self.bench_fold_table.resizeRowsToContents()
+
+    def _render_benchmark_chart(self, suite: Any) -> None:
+        if self.bench_fig is None or self.bench_ax is None:
+            return
+        metric_label = self.bench_chart_metric_combo.currentText()
+        metric_key_map = {
+            "RS MAE": "rs_mae_mean",
+            "Thickness MAE": "thickness_mae_mean",
+            "RSU MAE": "rsu_mae_mean",
+            "Spec pass accuracy": "spec_pass_accuracy_mean",
+        }
+        metric_key = metric_key_map.get(metric_label, "spec_pass_accuracy_mean")
+
+        rows = suite.to_table_rows()
+        labels = [r.get("bundle_name", "") for r in rows]
+        values: list[float] = []
+        for r in rows:
+            v = r.get(metric_key)
+            values.append(float(v) if v is not None else float("nan"))
+
+        self.bench_ax.clear()
+        x = list(range(len(labels)))
+        self.bench_ax.bar(x, values, color="#4c78a8")
+        self.bench_ax.set_xticks(x)
+        self.bench_ax.set_xticklabels(labels, rotation=25, ha="right")
+        self.bench_ax.set_title(f"Benchmark comparison: {metric_label}")
+        self.bench_ax.grid(True, alpha=0.2, axis="y")
+        self.bench_fig.tight_layout()
+        if self.bench_canvas is not None:
+            self.bench_canvas.draw_idle()
+
+    def _render_benchmark_best_explanation(self, suite: Any, ranked: list[dict[str, Any]]) -> None:
+        if not ranked:
+            self.bench_best_explanation.setPlainText("No benchmark results to explain.")
+            return
+
+        best_bundle = ranked[0]["bundle_name"]
+        best_run = None
+        second_bundle = ranked[1]["bundle_name"] if len(ranked) > 1 else None
+        second_run = None
+        for run in suite.runs:
+            if run.bundle_name == best_bundle:
+                best_run = run
+            if second_bundle and run.bundle_name == second_bundle:
+                second_run = run
+
+        if best_run is None:
+            self.bench_best_explanation.setPlainText("Best bundle not found in suite runs.")
+            return
+
+        primary = ranked[0].get("primary_mean")
+        secondary = ranked[0].get("secondary_mean")
+        lines = [
+            f"Best model bundle: {best_bundle}",
+            f"Primary metric (spec-pass accuracy mean): {primary if primary is not None else '-'}",
+            f"Secondary metric (RS MAE mean): {secondary if secondary is not None else '-'}",
+            f"Fold count: {len(best_run.summary.folds)}",
+        ]
+
+        # Tradeoff vs second best (same primary metric ordering).
+        if second_run is not None and second_bundle is not None:
+            sec_primary = ranked[1].get("primary_mean")
+            sec_secondary = ranked[1].get("secondary_mean")
+            lines.append("")
+            lines.append(f"Runner-up: {second_bundle}")
+            lines.append(
+                f"Runner-up primary={sec_primary if sec_primary is not None else '-'}, secondary(RS MAE)={sec_secondary if sec_secondary is not None else '-'}"
+            )
+
+        # Confidence heuristic: small test sets lower trust.
+        if best_run.summary.folds:
+            avg_test = sum(f.test_row_count for f in best_run.summary.folds) / max(len(best_run.summary.folds), 1)
+            if avg_test < 5:
+                lines.append("")
+                lines.append(f"Confidence may be low: avg test rows per fold = {avg_test:.2f} (small holdout).")
+
+        all_warnings: list[str] = []
+        for f in best_run.summary.folds:
+            if f.warnings:
+                all_warnings.extend(f.warnings)
+        if best_run.summary.aggregate_warnings:
+            all_warnings.extend(best_run.summary.aggregate_warnings)
+
+        if all_warnings:
+            lines.append("")
+            lines.append("Warnings:")
+            lines.extend([f"- {w}" for w in sorted(set(all_warnings))])
+
+        self.bench_best_explanation.setPlainText("\n".join(lines))
 
     def _start_eval_worker(self, df: pd.DataFrame, scenario_a: ScenarioConfig, scenario_b: ScenarioConfig) -> None:
         if self._eval_thread is not None and self._eval_thread.isRunning():

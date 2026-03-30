@@ -255,3 +255,31 @@ def rank_benchmark_results(
     ranked_sorted = sorted(ranked, key=sort_key)
     return ranked_sorted
 
+
+def flatten_benchmark_suite_folds(results: BenchmarkSuiteResult) -> list[dict[str, Any]]:
+    """Flatten suite fold details into UI/CSV-friendly dict rows."""
+    rows: list[dict[str, Any]] = []
+    for run in results.runs:
+        for fold in run.summary.folds:
+            rows.append(
+                {
+                    "bundle_name": run.bundle_name,
+                    "split_mode": run.split_mode,
+                    "split_name": fold.split_name,
+                    "split_type": fold.split_type,
+                    "train_row_count": fold.train_row_count,
+                    "test_row_count": fold.test_row_count,
+                    "train_target_ids": ",".join(fold.train_target_ids or []),
+                    "test_target_ids": ",".join(fold.test_target_ids or []),
+                    "rs_mae": fold.rs_mae,
+                    "rs_rmse": fold.rs_rmse,
+                    "thickness_mae": fold.thickness_mae,
+                    "thickness_rmse": fold.thickness_rmse,
+                    "rsu_mae": fold.rsu_mae,
+                    "rsu_rmse": fold.rsu_rmse,
+                    "spec_pass_accuracy": fold.spec_pass_accuracy,
+                    "warnings": ";".join(fold.warnings or []),
+                }
+            )
+    return rows
+

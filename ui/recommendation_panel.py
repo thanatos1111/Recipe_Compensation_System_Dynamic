@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -97,7 +98,9 @@ class RecommendationPanel(QWidget):
 
         comparison_tab = QWidget()
         comparison_layout = QVBoxLayout()
-        comparison_splitter = QSplitter(Qt.Orientation.Vertical)
+        # Left/right layout so the comparison table + plots get enough vertical
+        # space to be readable.
+        comparison_splitter = QSplitter(Qt.Orientation.Horizontal)
         comparison_splitter.setChildrenCollapsible(False)
 
         # Top pane: candidate selector + score breakdown.
@@ -114,8 +117,8 @@ class RecommendationPanel(QWidget):
         self.score_breakdown_table = QTableWidget()
         self.score_breakdown_table.setWordWrap(True)
         self.score_breakdown_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.score_breakdown_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
-        self.score_breakdown_table.setMinimumHeight(140)
+        self.score_breakdown_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.score_breakdown_table.setMinimumHeight(170)
         top_layout.addWidget(self.score_breakdown_table)
         top_layout.setStretchFactor(self.score_breakdown_table, 1)
         top_panel.setLayout(top_layout)
@@ -143,7 +146,7 @@ class RecommendationPanel(QWidget):
         if FigureCanvas is not None:
             self.canvas = FigureCanvas(self.figure)
             # Keep canvas responsive so the bottom pane doesn't get pushed off-screen.
-            self.canvas.setMinimumHeight(240)
+            self.canvas.setMinimumHeight(200)
             self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             plot_layout.addWidget(self.canvas)
             plot_layout.setStretchFactor(self.canvas, 1)
@@ -155,9 +158,19 @@ class RecommendationPanel(QWidget):
 
         # Bottom pane: comparison table + plots subtabs.
         comparison_splitter.addWidget(top_panel)
-        comparison_splitter.addWidget(comparison_views_tabs)
-        comparison_splitter.setStretchFactor(0, 0)
-        comparison_splitter.setStretchFactor(1, 1)
+
+        # The bottom pane can get tall (table + plots). Wrap it in a scroll
+        # container so content doesn't overflow the tab on small windows.
+        comparison_views_scroll = QScrollArea()
+        comparison_views_scroll.setWidgetResizable(True)
+        comparison_views_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        comparison_views_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        comparison_views_scroll.setWidget(comparison_views_tabs)
+        comparison_splitter.addWidget(comparison_views_scroll)
+
+        # Give the right pane (comparison tables/plots) most width.
+        comparison_splitter.setStretchFactor(0, 1)
+        comparison_splitter.setStretchFactor(1, 4)
         comparison_layout.addWidget(comparison_splitter)
         comparison_tab.setLayout(comparison_layout)
         self.content_tabs.addTab(comparison_tab, "Candidate Comparison")

@@ -5,6 +5,7 @@ import pandas as pd
 
 from core.benchmarking import (
     MODEL_BUNDLE_PRESETS,
+    flatten_benchmark_suite_folds,
     rank_benchmark_results,
     run_prediction_benchmark,
 )
@@ -161,6 +162,29 @@ class TestBenchmarking(unittest.TestCase):
         self.assertTrue(fold_rs_maes)
         expected_mean = float(np.asarray(fold_rs_maes, dtype=float).mean())
         self.assertAlmostEqual(float(run.summary.rs_mae_mean), expected_mean, places=12)
+
+    def test_flatten_fold_details(self) -> None:
+        df = _make_df()
+        spec = SpecConfig(use_rs_spec=False, use_thickness_spec=False, use_rsu_spec=False, rsu_max=0.0)
+        cfg = {
+            "spec_config": spec,
+            "feature_config": {"numeric_features": ["lifetime", "incident_angle"], "categorical_features": ["target_id"]},
+            "model_settings": {"random_state": 0},
+            "benchmark_settings": {"forward_chaining": {"n_splits": 1, "min_train_rows": 10, "min_test_rows": 4}},
+        }
+
+        out = run_prediction_benchmark(
+            df,
+            config=cfg,
+            model_names_by_target={"baseline_linear": MODEL_BUNDLE_PRESETS["baseline_linear"]},
+            split_modes=["forward_chaining"],
+        )
+        rows = flatten_benchmark_suite_folds(out)
+        self.assertGreaterEqual(len(rows), len(out.runs[0].summary.folds))
+        # Ensure labels exist.
+        for r in rows:
+            self.assertIn(r["split_mode"], {"forward_chaining"})
+            self.assertTrue(isinstance(r["warnings"], str))
 
 
 if __name__ == "__main__":
