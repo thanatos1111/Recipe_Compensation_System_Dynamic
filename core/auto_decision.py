@@ -176,8 +176,13 @@ def score_auto_decision_candidates(
         bn = str(r.get("bundle_name", ""))
         s = bt_map.get(bn)
         if s is None:
+            r["backtest_rows_evaluated"] = 0
+            r["backtest_usable_for_scoring"] = False
             continue
-        r["backtest_rows_evaluated"] = int(getattr(s, "rows_evaluated", 0) or 0)
+
+        rows_eval = int(getattr(s, "rows_evaluated", 0) or 0)
+        r["backtest_rows_evaluated"] = rows_eval
+        r["backtest_usable_for_scoring"] = rows_eval >= int(backtest_min_rows_for_use)
         r["backtest_recommendation_improvement_rate"] = getattr(s, "recommendation_improvement_rate", None)
         r["backtest_predicted_spec_pass_improvement_rate"] = getattr(s, "predicted_spec_pass_improvement_rate", None)
         r["backtest_no_change_fraction"] = getattr(s, "no_change_fraction", None)
@@ -195,29 +200,38 @@ def score_auto_decision_candidates(
 
         rank_index: dict[str, int] = {str(r.get("bundle_name", "")): i for i, r in enumerate(rows)}
 
-        def _bt_sort_key(item: dict[str, Any]) -> tuple[float, float, float, int]:
+        def _bt_sort_key(item: dict[str, Any]) -> tuple[float, float, float, float, int]:
             bn = str(item.get("bundle_name", ""))
             idx = int(rank_index.get(bn, 10**9))
+
+            usable_flag = bool(item.get("backtest_usable_for_scoring", False))
 
             pred = item.get("backtest_predicted_spec_pass_improvement_rate")
             rec = item.get("backtest_recommendation_improvement_rate")
             nc = item.get("backtest_no_change_fraction")
 
-            try:
-                pred_v = float(pred) if pred is not None else float("-inf")
-            except Exception:
-                pred_v = float("-inf")
-            try:
-                rec_v = float(rec) if rec is not None else float("-inf")
-            except Exception:
-                rec_v = float("-inf")
-            try:
-                nc_v = float(nc) if nc is not None else float("inf")
-            except Exception:
-                nc_v = float("inf")
+            if usable_flag:
+                try:
+                    pred_v = float(pred) if pred is not None else float("-inf")
+                except Exception:
+                    pred_v = float("-inf")
+                try:
+                    rec_v = float(rec) if rec is not None else float("-inf")
+                except Exception:
+                    rec_v = float("-inf")
+                try:
+                    nc_v = float(nc) if nc is not None else float("inf")
+                except Exception:
+                    nc_v = float("inf")
 
-            # higher is better for pred/rec, lower is better for nc.
-            return (-pred_v, -rec_v, nc_v, idx)
+                # usable bundles first:
+                # - higher is better for pred/rec
+                # - lower is better for nc
+                return (0.0, -pred_v, -rec_v, nc_v, idx)
+
+            # Per-bundle gate: keep unusable bundles after usable ones and
+            # preserve benchmark order among unusable bundles via `idx`.
+            return (1.0, 0.0, 0.0, 0.0, idx)
 
         return sorted(rows, key=_bt_sort_key)
 
@@ -543,6 +557,7 @@ def _build_explanation(
     backtest_min_rows_for_use: int,
 ) -> str:
     lines: list[str] = []
+    winner_usable_for_scoring: Optional[bool] = None
     lines.append("Auto-decision summary (material-local):")
     lines.append(f"- detected_regime: {regime.regime_label} (rows={regime.total_rows}, targets={regime.target_count})")
     lines.append(f"- split_modes_used: {split_modes}")
@@ -555,6 +570,7 @@ def _build_explanation(
 
     if scored:
         top = scored[0]
+        winner_usable_for_scoring = bool(top.get("backtest_usable_for_scoring", False))
         p = top.get("primary_mean")
         s = top.get("secondary_mean")
         if p is not None or s is not None:
@@ -583,6 +599,8 @@ def _build_explanation(
                         f"recommendation_improvement_rate={getattr(s, 'recommendation_improvement_rate', None)}, "
                         f"no_change_fraction={getattr(s, 'no_change_fraction', None)}"
                     )
+                if winner_usable_for_scoring is not None:
+                    lines.append(f"- winner_backtest_usable_for_scoring: {winner_usable_for_scoring}")
         else:
             lines.append(
                 "- recommendation-first goal requested, but backtest was unavailable/skipped/aborted "

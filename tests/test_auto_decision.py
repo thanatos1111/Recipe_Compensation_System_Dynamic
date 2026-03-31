@@ -150,6 +150,8 @@ class TestAutoDecision(unittest.TestCase):
             backtest_min_rows_for_use=5,
         )
         self.assertEqual(scored[0]["bundle_name"], "A")
+        self.assertTrue(bool(scored[0].get("backtest_usable_for_scoring", False)))
+        self.assertTrue(bool(scored[1].get("backtest_usable_for_scoring", False)))
 
     def test_recommendation_first_falls_back_when_backtest_rows_too_low(self) -> None:
         ranked = [
@@ -194,6 +196,159 @@ class TestAutoDecision(unittest.TestCase):
         )
         # Benchmark order preserved: A then B.
         self.assertEqual([r["bundle_name"] for r in scored[:2]], ["A", "B"])
+        self.assertFalse(bool(scored[0].get("backtest_usable_for_scoring", True)))
+        self.assertFalse(bool(scored[1].get("backtest_usable_for_scoring", True)))
+
+    def test_recommendation_first_per_bundle_gate_prefers_usable_bundle(self) -> None:
+        # Benchmark order is Low then Usable, but recommendation-first should prefer
+        # the usable bundle even when Low has extreme backtest rates.
+        ranked = [
+            {"bundle_name": "Low", "primary_mean": 0.1, "secondary_mean": 0.2},
+            {"bundle_name": "Usable", "primary_mean": 0.2, "secondary_mean": 0.1},
+        ]
+        backtest = RecommendationBacktestResult(
+            split_mode="leave_one_target_out",
+            split_folds=1,
+            summaries_by_bundle={
+                "Low": RecommendationBacktestSummary(
+                    bundle_name="Low",
+                    rows_evaluated=1,  # below gate
+                    recommendation_improvement_rate=0.9,
+                    predicted_spec_pass_improvement_rate=1.0,
+                    no_change_fraction=0.0,
+                    move_mean_abs_total=None,
+                    move_median_abs_total=None,
+                    move_max_abs_total=None,
+                    warnings=[],
+                ),
+                "Usable": RecommendationBacktestSummary(
+                    bundle_name="Usable",
+                    rows_evaluated=10,  # above gate
+                    recommendation_improvement_rate=0.3,
+                    predicted_spec_pass_improvement_rate=0.4,
+                    no_change_fraction=0.2,
+                    move_mean_abs_total=None,
+                    move_median_abs_total=None,
+                    move_max_abs_total=None,
+                    warnings=[],
+                ),
+            },
+            aborted=False,
+        )
+        scored = score_auto_decision_candidates(
+            ranked_bundles=ranked,
+            backtest_result=backtest,
+            objective="spec_pass_first",
+            decision_mode=DECISION_MODE_RECOMMENDATION_FIRST,
+            backtest_min_rows_for_use=5,
+        )
+        self.assertEqual([r["bundle_name"] for r in scored[:2]], ["Usable", "Low"])
+        self.assertTrue(bool(scored[0].get("backtest_usable_for_scoring", False)))
+        self.assertFalse(bool(scored[1].get("backtest_usable_for_scoring", True)))
+
+    def test_recommendation_first_unusable_bundles_preserve_benchmark_order(self) -> None:
+        ranked = [
+            {"bundle_name": "Low2", "primary_mean": 0.1, "secondary_mean": 0.2},
+            {"bundle_name": "Low1", "primary_mean": 0.2, "secondary_mean": 0.1},
+            {"bundle_name": "Usable", "primary_mean": 0.3, "secondary_mean": 0.0},
+        ]
+        backtest = RecommendationBacktestResult(
+            split_mode="leave_one_target_out",
+            split_folds=1,
+            summaries_by_bundle={
+                "Low1": RecommendationBacktestSummary(
+                    bundle_name="Low1",
+                    rows_evaluated=1,
+                    recommendation_improvement_rate=0.2,
+                    predicted_spec_pass_improvement_rate=0.9,
+                    no_change_fraction=0.1,
+                    move_mean_abs_total=None,
+                    move_median_abs_total=None,
+                    move_max_abs_total=None,
+                    warnings=[],
+                ),
+                "Low2": RecommendationBacktestSummary(
+                    bundle_name="Low2",
+                    rows_evaluated=1,
+                    recommendation_improvement_rate=0.8,
+                    predicted_spec_pass_improvement_rate=0.1,
+                    no_change_fraction=0.0,
+                    move_mean_abs_total=None,
+                    move_median_abs_total=None,
+                    move_max_abs_total=None,
+                    warnings=[],
+                ),
+                "Usable": RecommendationBacktestSummary(
+                    bundle_name="Usable",
+                    rows_evaluated=10,
+                    recommendation_improvement_rate=0.3,
+                    predicted_spec_pass_improvement_rate=0.4,
+                    no_change_fraction=0.2,
+                    move_mean_abs_total=None,
+                    move_median_abs_total=None,
+                    move_max_abs_total=None,
+                    warnings=[],
+                ),
+            },
+            aborted=False,
+        )
+        scored = score_auto_decision_candidates(
+            ranked_bundles=ranked,
+            backtest_result=backtest,
+            objective="spec_pass_first",
+            decision_mode=DECISION_MODE_RECOMMENDATION_FIRST,
+            backtest_min_rows_for_use=5,
+        )
+        # Usable first; then low-row bundles preserve benchmark ordering: Low2 then Low1.
+        self.assertEqual([r["bundle_name"] for r in scored[:3]], ["Usable", "Low2", "Low1"])
+        self.assertTrue(bool(scored[0].get("backtest_usable_for_scoring", False)))
+        self.assertFalse(bool(scored[1].get("backtest_usable_for_scoring", True)))
+        self.assertFalse(bool(scored[2].get("backtest_usable_for_scoring", True)))
+
+    def test_recommendation_first_all_unusable_bundles_preserve_benchmark_order(self) -> None:
+        ranked = [
+            {"bundle_name": "B", "primary_mean": 0.1, "secondary_mean": 0.2},
+            {"bundle_name": "A", "primary_mean": 0.2, "secondary_mean": 0.1},
+        ]
+        backtest = RecommendationBacktestResult(
+            split_mode="leave_one_target_out",
+            split_folds=1,
+            summaries_by_bundle={
+                "A": RecommendationBacktestSummary(
+                    bundle_name="A",
+                    rows_evaluated=1,
+                    recommendation_improvement_rate=0.9,
+                    predicted_spec_pass_improvement_rate=0.9,
+                    no_change_fraction=0.0,
+                    move_mean_abs_total=None,
+                    move_median_abs_total=None,
+                    move_max_abs_total=None,
+                    warnings=[],
+                ),
+                "B": RecommendationBacktestSummary(
+                    bundle_name="B",
+                    rows_evaluated=1,
+                    recommendation_improvement_rate=0.8,
+                    predicted_spec_pass_improvement_rate=1.0,
+                    no_change_fraction=0.1,
+                    move_mean_abs_total=None,
+                    move_median_abs_total=None,
+                    move_max_abs_total=None,
+                    warnings=[],
+                ),
+            },
+            aborted=False,
+        )
+        scored = score_auto_decision_candidates(
+            ranked_bundles=ranked,
+            backtest_result=backtest,
+            objective="spec_pass_first",
+            decision_mode=DECISION_MODE_RECOMMENDATION_FIRST,
+            backtest_min_rows_for_use=5,
+        )
+        self.assertEqual([r["bundle_name"] for r in scored[:2]], ["B", "A"])
+        self.assertFalse(bool(scored[0].get("backtest_usable_for_scoring", True)))
+        self.assertFalse(bool(scored[1].get("backtest_usable_for_scoring", True)))
 
     def test_render_report_shows_skipped_bundles(self) -> None:
         regime = DataRegime(
