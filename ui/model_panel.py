@@ -4,6 +4,7 @@ Model training and evaluation panel.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional
 import threading
 
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QScrollArea,
     QPushButton,
+    QMessageBox,
     QSplitter,
     QSizePolicy,
     QTabBar,
@@ -63,11 +66,20 @@ from core.benchmarking import (
     flatten_benchmark_suite_folds,
     run_prediction_benchmark,
 )
-from core.bundles import describe_bundle, get_bundle_catalog
+from core.bundles import (
+    CUSTOM_MODEL_BUNDLES_KEY,
+    describe_bundle,
+    get_bundle_catalog,
+    get_effective_model_bundles,
+    parse_custom_bundles_from_config,
+    validate_custom_bundle,
+)
+from core.config_store import load_effective_config, load_user_config, save_user_config
 from core.ranking import get_supported_ranking_objectives, get_supported_uncertainty_modes, rank_benchmark_suite
 from core.response_models import train_material_models
 from core.model_registry import get_model_availability_summary
 from core.schemas import MaterialDataset
+from ui.bundle_editor_dialog import BundleEditorDialog
 
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -156,9 +168,11 @@ class _EvalWorker(QObject):
 class ModelPanel(QWidget):
     def __init__(self) -> None:
         super().__init__()
+        self._project_root = Path(__file__).resolve().parents[1]
         self._material_dataset: Optional[MaterialDataset] = None
         self._active_target_id: Optional[str] = None
         self._config: dict[str, Any] = {}
+        self._bundle_catalog: dict[str, dict[str, Any]] = {}
         self._eval_thread: Optional[QThread] = None
         self._eval_worker: Optional[_EvalWorker] = None
         self._ordered_target_ids: list[str] = []
@@ -548,15 +562,29 @@ class ModelPanel(QWidget):
 
         self.bench_bundle_list = _NoPropagateWheelListWidget()
         self.bench_bundle_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
-        for bundle_name in MODEL_BUNDLE_PRESETS.keys():
-            self.bench_bundle_list.addItem(QListWidgetItem(bundle_name))
         self.bench_bundle_list.setMinimumHeight(110)
         self.bench_bundle_list.itemSelectionChanged.connect(self._refresh_benchmark_bundle_details)
+        self.bench_bundle_list.itemSelectionChanged.connect(self._refresh_bundle_crud_buttons)
 
         # Prompt 10 + layout polish: keep bundles and bundle details aligned as left/right panels.
         # Left: multi-select bundle list. Right: bundle details.
         bundles_left_layout = QVBoxLayout()
         bundles_left_layout.addWidget(QLabel("Model bundles (multi-select)"))
+
+        bundle_btn_row = QHBoxLayout()
+        self.bench_bundle_create_btn = QPushButton("Create custom bundle")
+        self.bench_bundle_edit_btn = QPushButton("Edit custom bundle")
+        self.bench_bundle_delete_btn = QPushButton("Delete custom bundle")
+        self.bench_bundle_edit_btn.setEnabled(False)
+        self.bench_bundle_delete_btn.setEnabled(False)
+        self.bench_bundle_create_btn.clicked.connect(self._bundle_create_clicked)
+        self.bench_bundle_edit_btn.clicked.connect(self._bundle_edit_clicked)
+        self.bench_bundle_delete_btn.clicked.connect(self._bundle_delete_clicked)
+        bundle_btn_row.addWidget(self.bench_bundle_create_btn)
+        bundle_btn_row.addWidget(self.bench_bundle_edit_btn)
+        bundle_btn_row.addWidget(self.bench_bundle_delete_btn)
+        bundles_left_layout.addLayout(bundle_btn_row)
+
         bundles_left_layout.addWidget(self.bench_bundle_list)
         bundles_left_layout.setContentsMargins(0, 0, 0, 0)
         bundles_left = QWidget()
@@ -884,6 +912,7 @@ class ModelPanel(QWidget):
         self._material_dataset = material_dataset
         self._active_target_id = active_target_id
         self._config = config
+        self._reload_benchmark_bundle_list()
         self.material_label.setText(material_dataset.material_name)
         target_ids = self._ordered_targets(material_dataset)
         self._ordered_target_ids = target_ids
@@ -1752,7 +1781,7 @@ class ModelPanel(QWidget):
         # this minimal for Prompt 10.)
         bn = str(selected[0])
         try:
-            desc = describe_bundle(bn, catalog=get_bundle_catalog())
+            desc = describe_bundle(bn, catalog=get_bundle_catalog(config=self._config))
         except Exception as exc:
             self.bench_bundle_details_text.setPlainText(f"Unable to describe bundle {bn!r}: {exc}")
             return
@@ -1780,6 +1809,134 @@ class ModelPanel(QWidget):
             lines += ["", f"Also selected: {more}"]
 
         self.bench_bundle_details_text.setPlainText("\n".join(lines))
+
+    def _reload_benchmark_bundle_list(self) -> None:
+        if not hasattr(self, "bench_bundle_list"):
+            return
+        self._bundle_catalog = get_bundle_catalog(config=self._config)
+        self.bench_bundle_list.clear()
+
+        preset_names = list((MODEL_BUNDLE_PRESETS or {}).keys())
+        preset_names.sort()
+        custom_names = [k for k, v in self._bundle_catalog.items() if (v or {}).get("source") == "custom"]
+        custom_names.sort()
+
+        for name in [*preset_names, *custom_names]:
+            if name not in self._bundle_catalog:
+                continue
+            self.bench_bundle_list.addItem(QListWidgetItem(name))
+
+        self._refresh_bundle_crud_buttons()
+
+    def _selected_single_bundle_name(self) -> Optional[str]:
+        selected = self._selected_targets_from_widget(self.bench_bundle_list)
+        if len(selected) != 1:
+            return None
+        return str(selected[0])
+
+    def _refresh_bundle_crud_buttons(self) -> None:
+        if not hasattr(self, "bench_bundle_edit_btn") or not hasattr(self, "bench_bundle_delete_btn"):
+            return
+        bn = self._selected_single_bundle_name()
+        if not bn:
+            self.bench_bundle_edit_btn.setEnabled(False)
+            self.bench_bundle_delete_btn.setEnabled(False)
+            return
+        src = str((self._bundle_catalog.get(bn) or {}).get("source") or "")
+        is_custom = src == "custom"
+        self.bench_bundle_edit_btn.setEnabled(is_custom)
+        self.bench_bundle_delete_btn.setEnabled(is_custom)
+
+    def _load_custom_bundles_user_config(self) -> dict[str, dict[str, str]]:
+        uc = load_user_config(self._project_root)
+        return parse_custom_bundles_from_config(uc)
+
+    def _save_custom_bundles_user_config(self, bundles: dict[str, dict[str, str]]) -> None:
+        uc = load_user_config(self._project_root)
+        uc[CUSTOM_MODEL_BUNDLES_KEY] = dict(bundles)
+        save_user_config(self._project_root, uc)
+        # Refresh effective config so this panel uses the persisted value.
+        self._config = load_effective_config(self._project_root)
+
+    def _bundle_create_clicked(self) -> None:
+        preset_names = set((MODEL_BUNDLE_PRESETS or {}).keys())
+        dlg = BundleEditorDialog(
+            title="Create custom bundle",
+            preset_bundle_names=preset_names,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        name, models = dlg.value()
+        try:
+            normalized = validate_custom_bundle(name=name, models=models, preset_names=preset_names)
+        except Exception as exc:
+            QMessageBox.warning(self, "Invalid bundle", str(exc))
+            return
+
+        custom = self._load_custom_bundles_user_config()
+        if name in custom:
+            QMessageBox.warning(self, "Duplicate name", f"Custom bundle {name!r} already exists.")
+            return
+        custom[name] = normalized
+        self._save_custom_bundles_user_config(custom)
+        self._reload_benchmark_bundle_list()
+
+    def _bundle_edit_clicked(self) -> None:
+        bn = self._selected_single_bundle_name()
+        if not bn:
+            QMessageBox.warning(self, "Edit bundle", "Select exactly one custom bundle to edit.")
+            return
+        src = str((self._bundle_catalog.get(bn) or {}).get("source") or "")
+        if src != "custom":
+            QMessageBox.warning(self, "Edit bundle", "Preset bundles are read-only.")
+            return
+
+        custom = self._load_custom_bundles_user_config()
+        initial = custom.get(bn) or {}
+        preset_names = set((MODEL_BUNDLE_PRESETS or {}).keys())
+        dlg = BundleEditorDialog(
+            title="Edit custom bundle",
+            preset_bundle_names=preset_names,
+            initial_name=bn,
+            initial_models=initial,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        name, models = dlg.value()
+        try:
+            normalized = validate_custom_bundle(name=name, models=models, preset_names=preset_names)
+        except Exception as exc:
+            QMessageBox.warning(self, "Invalid bundle", str(exc))
+            return
+
+        # Editing keeps name stable (simplifies collision behavior).
+        if name != bn:
+            QMessageBox.warning(self, "Rename not supported", "Renaming bundles is not supported. Edit models only.")
+            return
+
+        custom[bn] = normalized
+        self._save_custom_bundles_user_config(custom)
+        self._reload_benchmark_bundle_list()
+
+    def _bundle_delete_clicked(self) -> None:
+        bn = self._selected_single_bundle_name()
+        if not bn:
+            QMessageBox.warning(self, "Delete bundle", "Select exactly one custom bundle to delete.")
+            return
+        src = str((self._bundle_catalog.get(bn) or {}).get("source") or "")
+        if src != "custom":
+            QMessageBox.warning(self, "Delete bundle", "Preset bundles cannot be deleted.")
+            return
+
+        res = QMessageBox.question(self, "Delete custom bundle", f"Delete custom bundle {bn!r}?")
+        if res != QMessageBox.StandardButton.Yes:
+            return
+        custom = self._load_custom_bundles_user_config()
+        custom.pop(bn, None)
+        self._save_custom_bundles_user_config(custom)
+        self._reload_benchmark_bundle_list()
 
     @staticmethod
     def _dedupe_preserve_order(items: list[str]) -> list[str]:
@@ -2005,7 +2162,8 @@ class ModelPanel(QWidget):
 
         bench_config["benchmark_settings"] = bs
 
-        model_subset = {bn: MODEL_BUNDLE_PRESETS[bn] for bn in selected_bundles if bn in MODEL_BUNDLE_PRESETS}
+        effective_bundles = get_effective_model_bundles(self._config)
+        model_subset = {bn: effective_bundles[bn] for bn in selected_bundles if bn in effective_bundles}
         if not model_subset:
             self.bench_status_label.setText("No valid model bundles selected.")
             return
@@ -2122,15 +2280,16 @@ class ModelPanel(QWidget):
             return
 
         winner = self._last_benchmark_best_bundle
-        preset = MODEL_BUNDLE_PRESETS.get(winner)
-        if not preset:
-            self.bench_status_label.setText("Winner preset not found.")
+        effective_bundles = get_effective_model_bundles(self._config)
+        chosen = effective_bundles.get(winner)
+        if not chosen:
+            self.bench_status_label.setText("Winner bundle not found.")
             return
 
         ms = dict(self._config.get("model_settings") or {})
-        ms["rs_model"] = preset["rs"]
-        ms["thickness_model"] = preset["thickness"]
-        ms["rsu_model"] = preset["rsu"]
+        ms["rs_model"] = chosen["rs"]
+        ms["thickness_model"] = chosen["thickness"]
+        ms["rsu_model"] = chosen["rsu"]
         self._config["model_settings"] = ms
 
         self.bench_status_label.setText(f"Winner adopted: {winner}. Click Train to retrain.")

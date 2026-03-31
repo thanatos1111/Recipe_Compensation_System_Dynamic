@@ -14,6 +14,9 @@ from typing import Any, Mapping, Optional
 from core.benchmarking import MODEL_BUNDLE_PRESETS
 from core.model_registry import get_supported_model_specs
 
+CUSTOM_MODEL_BUNDLES_KEY = "custom_model_bundles"
+_BUNDLE_TARGET_KEYS: tuple[str, ...] = ("rs", "thickness", "rsu")
+
 
 @dataclass(frozen=True)
 class BundleModelSpec:
@@ -37,7 +40,99 @@ class BundleDescription:
         return {m.target: m for m in self.models}
 
 
-def get_bundle_catalog(*, include_presets: bool = True) -> dict[str, dict[str, Any]]:
+def _supported_model_names() -> set[str]:
+    return set(get_supported_model_specs().keys())
+
+
+def normalize_bundle_models(models: Mapping[str, Any]) -> dict[str, str]:
+    """
+    Normalize a bundle model mapping to ``{"rs": ..., "thickness": ..., "rsu": ...}``.
+
+    Raises
+    ------
+    ValueError
+        If required targets are missing.
+    TypeError
+        If the input is not a mapping.
+    """
+    if not isinstance(models, Mapping):
+        raise TypeError("Bundle models must be a mapping.")
+    out: dict[str, str] = {}
+    for k in _BUNDLE_TARGET_KEYS:
+        v = models.get(k)
+        s = str(v or "").strip()
+        if not s:
+            raise ValueError(f"Bundle models missing required target {k!r}.")
+        out[k] = s
+    return out
+
+
+def validate_custom_bundle(
+    *,
+    name: str,
+    models: Mapping[str, Any],
+    preset_names: Optional[set[str]] = None,
+    supported_model_names: Optional[set[str]] = None,
+) -> dict[str, str]:
+    """
+    Validate a custom bundle definition and return normalized model mapping.
+
+    Rules
+    -----
+    - Name must be non-empty.
+    - Name must not collide with preset bundles (preset bundles are read-only).
+    - Model names must exist in the registry.
+    """
+    bn = str(name or "").strip()
+    if not bn:
+        raise ValueError("Bundle name is required.")
+
+    preset = preset_names or set((MODEL_BUNDLE_PRESETS or {}).keys())
+    if bn in preset:
+        raise ValueError(f"Bundle name {bn!r} collides with a preset bundle and cannot be reused.")
+
+    normalized = normalize_bundle_models(models)
+    supported = supported_model_names or _supported_model_names()
+    for target, mn in normalized.items():
+        if mn not in supported:
+            raise ValueError(f"Unsupported model name for {target!r}: {mn!r}.")
+    return normalized
+
+
+def parse_custom_bundles_from_config(config: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    """
+    Parse custom bundles from an effective config mapping.
+
+    This parser is tolerant: invalid entries are skipped so a partially-invalid
+    user config doesn't break the UI.
+    """
+    raw = (config or {}).get(CUSTOM_MODEL_BUNDLES_KEY, {})
+    if not isinstance(raw, Mapping):
+        return {}
+    supported = _supported_model_names()
+    preset = set((MODEL_BUNDLE_PRESETS or {}).keys())
+    out: dict[str, dict[str, str]] = {}
+    for name, models in raw.items():
+        try:
+            bn = str(name or "").strip()
+            if not bn or bn in preset:
+                continue
+            if not isinstance(models, Mapping):
+                continue
+            normalized = normalize_bundle_models(models)
+            if any(mn not in supported for mn in normalized.values()):
+                continue
+            out[bn] = normalized
+        except Exception:
+            continue
+    return out
+
+
+def get_bundle_catalog(
+    *,
+    config: Optional[Mapping[str, Any]] = None,
+    include_presets: bool = True,
+) -> dict[str, dict[str, Any]]:
     """
     Return a simple catalog of known bundles.
 
@@ -47,7 +142,30 @@ def get_bundle_catalog(*, include_presets: bool = True) -> dict[str, dict[str, A
     if include_presets:
         for name, targets in (MODEL_BUNDLE_PRESETS or {}).items():
             out[str(name)] = {"source": "preset", "models": dict(targets)}
+    if config is not None:
+        for name, models in parse_custom_bundles_from_config(config).items():
+            if name in out:
+                # Presets are authoritative; skip collisions at runtime.
+                continue
+            out[str(name)] = {"source": "custom", "models": dict(models)}
     return out
+
+
+def get_effective_model_bundles(config: Optional[Mapping[str, Any]] = None) -> dict[str, dict[str, str]]:
+    """
+    Return bundle defs for benchmark/backtest runners.
+
+    Presets are always included. Custom bundles from config are merged in, and
+    preset-name collisions are ignored (presets win).
+    """
+    merged: dict[str, dict[str, str]] = {k: dict(v) for k, v in (MODEL_BUNDLE_PRESETS or {}).items()}
+    if config is None:
+        return merged
+    for name, models in parse_custom_bundles_from_config(config).items():
+        if name in merged:
+            continue
+        merged[name] = dict(models)
+    return merged
 
 
 def describe_bundle(

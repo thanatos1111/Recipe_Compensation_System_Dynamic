@@ -19,7 +19,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 import pandas as pd
 
-from core.benchmarking import MODEL_BUNDLE_PRESETS
+from core.bundles import get_effective_model_bundles
 from core.candidate_generator import generate_candidates
 from core.feature_engineering import build_feature_matrix
 from core.labeling import apply_spec_labels
@@ -236,10 +236,11 @@ def backtest_single_fold(
     weights = config.get("optimizer_weights") or {}
     feature_config = config.get("feature_config") or {}
 
-    preset = MODEL_BUNDLE_PRESETS.get(model_bundle_name) or {}
-    rs_model_name = preset.get("rs", config.get("model_settings", {}).get("rs_model", "gbr"))
-    thickness_model_name = preset.get("thickness", config.get("model_settings", {}).get("thickness_model", "gbr"))
-    rsu_model_name = preset.get("rsu", config.get("model_settings", {}).get("rsu_model", "gbr"))
+    bundles = get_effective_model_bundles(config)
+    chosen = bundles.get(model_bundle_name) or {}
+    rs_model_name = chosen.get("rs", config.get("model_settings", {}).get("rs_model", "gbr"))
+    thickness_model_name = chosen.get("thickness", config.get("model_settings", {}).get("thickness_model", "gbr"))
+    rsu_model_name = chosen.get("rsu", config.get("model_settings", {}).get("rsu_model", "gbr"))
 
     # Fit regression pipelines on fold train rows only.
     X_train = build_feature_matrix(train_df, feature_config)
