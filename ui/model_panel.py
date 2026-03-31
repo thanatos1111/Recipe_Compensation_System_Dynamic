@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QSizePolicy,
+    QTabBar,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -43,6 +44,19 @@ from core.feature_engineering import build_feature_matrix, get_feature_schema
 from core.instance_correction import fit_instance_bias, summarize_recent_residuals
 from core.model_explanations import TrainingExplanation, build_training_explanation
 from core.pipeline_inspection import build_processing_view_data
+from core.benchmark_chart_helpers import (
+    BENCH_CHART_TAB_BACKTEST,
+    BENCH_CHART_TAB_RSU,
+    BENCH_CHART_TAB_RS,
+    BENCH_CHART_TAB_SPEC_PASS,
+    BENCH_CHART_TAB_THICKNESS,
+    BENCH_CHART_TAB_UNCERTAINTY,
+    backtest_chart_placeholder_text,
+    benchmark_rows_have_any_uncertainty_metrics,
+    plot_recommendation_backtest_rates,
+    recommendation_backtest_has_chart_data,
+    uncertainty_chart_placeholder_text,
+)
 from core.benchmark_ranking_display import format_uncertainty_ranking_explanation_lines
 from core.benchmarking import (
     MODEL_BUNDLE_PRESETS,
@@ -513,10 +527,6 @@ class ModelPanel(QWidget):
         self.bench_active_cutoff_box.setLayout(active_cutoff_layout)
         benchmark_form.addRow("Active cutoff params:", self.bench_active_cutoff_box)
 
-        self.bench_chart_metric_combo = QComboBox()
-        self.bench_chart_metric_combo.addItems(["RS MAE", "Thickness MAE", "RSU MAE", "Spec pass accuracy"])
-        benchmark_form.addRow("Chart metric:", self.bench_chart_metric_combo)
-
         # Ranking objective controls (Prompt 8.1).
         self.bench_ranking_objective_combo = QComboBox()
         self.bench_ranking_objective_combo.addItems(
@@ -754,7 +764,11 @@ class ModelPanel(QWidget):
         chart_widget = QWidget()
         chart_layout = QVBoxLayout()
         self.bench_fig = Figure(figsize=(6, 4))
-        self.bench_ax = self.bench_fig.add_subplot(111)
+        self.bench_chart_tab_bar = QTabBar()
+        for label in ("Spec-pass", "RS", "Thickness", "RSU", "Uncertainty", "Backtest"):
+            self.bench_chart_tab_bar.addTab(label)
+        self.bench_chart_tab_bar.currentChanged.connect(self._on_bench_chart_tab_changed)
+        chart_layout.addWidget(self.bench_chart_tab_bar)
         if FigureCanvas is not None:
             self.bench_canvas = FigureCanvas(self.bench_fig)
             self.bench_canvas.setMinimumHeight(220)
@@ -787,6 +801,8 @@ class ModelPanel(QWidget):
 
         # Initialize backtest widgets to the "disabled" state.
         self._on_bench_backtest_toggled(bool(self.bench_backtest_enabled_checkbox.isChecked()))
+
+        self._refresh_bench_chart()
 
         self.setLayout(layout)
 
@@ -1803,21 +1819,7 @@ class ModelPanel(QWidget):
                 self.bench_backtest_canvas.draw_idle()
             return
 
-        bundles = [str(r.get("bundle_name", "")) for r in rows]
-        improve = [float(r.get("recommendation_improvement_rate") or 0.0) for r in rows]
-        spec_improve = [float(r.get("predicted_spec_pass_improvement_rate") or 0.0) for r in rows]
-
-        x = list(range(len(bundles)))
-        width = 0.38
-        self.bench_backtest_ax.bar([v - width / 2 for v in x], improve, width=width, label="Score improvement rate", color="#4c78a8")
-        self.bench_backtest_ax.bar([v + width / 2 for v in x], spec_improve, width=width, label="Pred spec-pass improvement rate", color="#59a14f")
-        self.bench_backtest_ax.set_xticks(x)
-        self.bench_backtest_ax.set_xticklabels(bundles, rotation=25, ha="right")
-        self.bench_backtest_ax.set_ylim(0.0, 1.0)
-        self.bench_backtest_ax.set_ylabel("Rate")
-        self.bench_backtest_ax.set_title("Recommendation backtest (fold replay)")
-        self.bench_backtest_ax.grid(True, alpha=0.2, axis="y")
-        self.bench_backtest_ax.legend(fontsize=8, loc="best")
+        plot_recommendation_backtest_rates(self.bench_backtest_ax, rows)
 
         if self.bench_backtest_canvas is not None:
             self.bench_backtest_canvas.draw_idle()
@@ -1958,7 +1960,7 @@ class ModelPanel(QWidget):
 
         self._render_benchmark_summary_table(suite)
         self._render_benchmark_fold_table(suite)
-        self._render_benchmark_chart(suite)
+        self._refresh_bench_chart()
         self._render_benchmark_best_explanation(suite, ranked)
         self._render_benchmark_warning_summary(suite)
         if weight_warning:
@@ -2107,35 +2109,159 @@ class ModelPanel(QWidget):
         # Update column widths based on (potentially longer) header text.
         self.bench_fold_table.resizeColumnsToContents()
 
-    def _render_benchmark_chart(self, suite: Any) -> None:
-        if self.bench_fig is None or self.bench_ax is None:
-            return
-        metric_label = self.bench_chart_metric_combo.currentText()
-        metric_key_map = {
-            "RS MAE": "rs_mae_mean",
-            "Thickness MAE": "thickness_mae_mean",
-            "RSU MAE": "rsu_mae_mean",
-            "Spec pass accuracy": "spec_pass_accuracy_mean",
-        }
-        metric_key = metric_key_map.get(metric_label, "spec_pass_accuracy_mean")
+    def _on_bench_chart_tab_changed(self, _index: int) -> None:
+        self._refresh_bench_chart()
 
-        rows = suite.to_table_rows()
+    def _render_benchmark_chart_placeholder(self, ax: Any, message: str) -> None:
+        ax.clear()
+        ax.axis("off")
+        ax.text(0.5, 0.5, message, ha="center", va="center", fontsize=10, wrap=True, transform=ax.transAxes)
+
+    def _render_benchmark_chart_spec_pass(self, ax: Any, rows: list[dict[str, Any]]) -> None:
         labels = [r.get("bundle_name", "") for r in rows]
-        values: list[float] = []
-        for r in rows:
-            v = r.get(metric_key)
-            values.append(float(v) if v is not None else float("nan"))
-
-        self.bench_ax.clear()
+        values = [
+            float(v) if (v := r.get("spec_pass_accuracy_mean")) is not None else float("nan") for r in rows
+        ]
         x = list(range(len(labels)))
-        self.bench_ax.bar(x, values, color="#4c78a8")
-        self.bench_ax.set_xticks(x)
-        self.bench_ax.set_xticklabels(labels, rotation=25, ha="right")
-        self.bench_ax.set_title(f"Benchmark comparison: {metric_label}")
-        self.bench_ax.grid(True, alpha=0.2, axis="y")
-        self.bench_fig.tight_layout()
-        if self.bench_canvas is not None:
-            self.bench_canvas.draw_idle()
+        ax.bar(x, values, color="#4c78a8")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=25, ha="right")
+        ax.set_title("Benchmark: spec-pass accuracy")
+        ax.set_ylabel("Accuracy")
+        ax.set_ylim(0.0, 1.05)
+        ax.grid(True, alpha=0.2, axis="y")
+
+    def _render_benchmark_chart_rs(self, ax: Any, rows: list[dict[str, Any]]) -> None:
+        labels = [r.get("bundle_name", "") for r in rows]
+        values = [float(v) if (v := r.get("rs_mae_mean")) is not None else float("nan") for r in rows]
+        x = list(range(len(labels)))
+        ax.bar(x, values, color="#4c78a8")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=25, ha="right")
+        ax.set_title("Benchmark: RS MAE (lower is better)")
+        ax.set_ylabel("MAE")
+        ax.grid(True, alpha=0.2, axis="y")
+
+    def _render_benchmark_chart_thickness(self, ax: Any, rows: list[dict[str, Any]]) -> None:
+        labels = [r.get("bundle_name", "") for r in rows]
+        values = [float(v) if (v := r.get("thickness_mae_mean")) is not None else float("nan") for r in rows]
+        x = list(range(len(labels)))
+        ax.bar(x, values, color="#4c78a8")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=25, ha="right")
+        ax.set_title("Benchmark: thickness MAE (lower is better)")
+        ax.set_ylabel("MAE")
+        ax.grid(True, alpha=0.2, axis="y")
+
+    def _render_benchmark_chart_rsu(self, ax: Any, rows: list[dict[str, Any]]) -> None:
+        labels = [r.get("bundle_name", "") for r in rows]
+        values = [float(v) if (v := r.get("rsu_mae_mean")) is not None else float("nan") for r in rows]
+        x = list(range(len(labels)))
+        ax.bar(x, values, color="#4c78a8")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=25, ha="right")
+        ax.set_title("Benchmark: RSU MAE (lower is better)")
+        ax.set_ylabel("MAE")
+        ax.grid(True, alpha=0.2, axis="y")
+
+    def _render_benchmark_chart_uncertainty(self, rows: list[dict[str, Any]]) -> None:
+        msg = uncertainty_chart_placeholder_text(
+            uncertainty_enabled_for_run=bool(self._last_benchmark_uncertainty_enabled),
+            metrics_available=benchmark_rows_have_any_uncertainty_metrics(rows),
+        )
+        if msg:
+            ax = self.bench_fig.add_subplot(111)
+            self._render_benchmark_chart_placeholder(ax, msg)
+            return
+
+        # Matplotlib versions vary in supported kwargs for Figure.subplots.
+        # Keep this compatible with older installs (e.g. 3.1x).
+        try:
+            self.bench_fig.set_constrained_layout(True)
+        except Exception:
+            pass
+        axes = self.bench_fig.subplots(2, 3)
+        bundles = [str(r.get("bundle_name", "")) for r in rows]
+        x = np.arange(len(bundles))
+        nominal = 1.0 - float(self.bench_uncertainty_alpha_spin.value())
+
+        cov_specs: tuple[tuple[str, str], ...] = (
+            ("rs_interval_coverage_mean", "RS coverage"),
+            ("thickness_interval_coverage_mean", "Thickness coverage"),
+            ("rsu_interval_coverage_mean", "RSU coverage"),
+        )
+        for j, (key, title) in enumerate(cov_specs):
+            ax_u = axes[0, j]
+            vals = [float(r[key]) if r.get(key) is not None else float("nan") for r in rows]
+            ax_u.bar(x, vals, color="#4c78a8")
+            line_kw = {"label": "Nominal (1 − α)"} if j == 0 else {}
+            ax_u.axhline(nominal, color="#c45a4a", linestyle="--", linewidth=1.0, **line_kw)
+            ax_u.set_xticks(x)
+            ax_u.set_xticklabels(bundles, rotation=25, ha="right", fontsize=8)
+            ax_u.set_title(title, fontsize=9)
+            ax_u.set_ylim(0.0, 1.05)
+            ax_u.grid(True, alpha=0.2, axis="y")
+            if j == 0:
+                ax_u.legend(fontsize=7, loc="lower right")
+
+        width_specs: tuple[tuple[str, str], ...] = (
+            ("rs_interval_mean_width_mean", "RS mean interval width"),
+            ("thickness_interval_mean_width_mean", "Thickness mean interval width"),
+            ("rsu_interval_mean_width_mean", "RSU mean interval width"),
+        )
+        for j, (key, title) in enumerate(width_specs):
+            ax_u = axes[1, j]
+            vals = [float(r[key]) if r.get(key) is not None else float("nan") for r in rows]
+            ax_u.bar(x, vals, color="#72b7b2")
+            ax_u.set_xticks(x)
+            ax_u.set_xticklabels(bundles, rotation=25, ha="right", fontsize=8)
+            ax_u.set_title(title, fontsize=9)
+            ax_u.grid(True, alpha=0.2, axis="y")
+
+    def _render_benchmark_chart_backtest(self, ax: Any) -> None:
+        bt = self._last_recommendation_backtest_result
+        if not recommendation_backtest_has_chart_data(bt):
+            self._render_benchmark_chart_placeholder(ax, backtest_chart_placeholder_text(False))
+            return
+        plot_recommendation_backtest_rates(ax, bt.to_table_rows())
+
+    def _refresh_bench_chart(self) -> None:
+        if self.bench_fig is None or self.bench_canvas is None:
+            return
+        tab = int(self.bench_chart_tab_bar.currentIndex())
+        suite = self._last_benchmark_suite_results
+        rows: list[dict[str, Any]] = list(suite.to_table_rows()) if suite is not None else []
+
+        self.bench_fig.clf()
+
+        if tab == BENCH_CHART_TAB_BACKTEST:
+            ax = self.bench_fig.add_subplot(111)
+            self._render_benchmark_chart_backtest(ax)
+        elif tab == BENCH_CHART_TAB_UNCERTAINTY:
+            self._render_benchmark_chart_uncertainty(rows)
+        else:
+            ax = self.bench_fig.add_subplot(111)
+            if not rows:
+                self._render_benchmark_chart_placeholder(
+                    ax, "No benchmark results yet. Run a benchmark to compare bundles."
+                )
+            elif tab == BENCH_CHART_TAB_SPEC_PASS:
+                self._render_benchmark_chart_spec_pass(ax, rows)
+            elif tab == BENCH_CHART_TAB_RS:
+                self._render_benchmark_chart_rs(ax, rows)
+            elif tab == BENCH_CHART_TAB_THICKNESS:
+                self._render_benchmark_chart_thickness(ax, rows)
+            elif tab == BENCH_CHART_TAB_RSU:
+                self._render_benchmark_chart_rsu(ax, rows)
+            else:
+                self._render_benchmark_chart_placeholder(ax, "Unknown chart selection.")
+
+        if tab != BENCH_CHART_TAB_UNCERTAINTY:
+            try:
+                self.bench_fig.tight_layout()
+            except Exception:
+                pass
+        self.bench_canvas.draw_idle()
 
     def _render_benchmark_best_explanation(self, suite: Any, ranked: list[dict[str, Any]]) -> None:
         if not ranked:
@@ -2340,6 +2466,7 @@ class ModelPanel(QWidget):
     def _on_backtest_finished(self, result: Any) -> None:
         self._last_recommendation_backtest_result = result
         self._render_recommendation_backtest(result)
+        self._refresh_bench_chart()
         self.bench_backtest_enabled_checkbox.setEnabled(True)
         self.bench_run_button.setEnabled(True)
         self.bench_backtest_abort_button.setEnabled(False)
