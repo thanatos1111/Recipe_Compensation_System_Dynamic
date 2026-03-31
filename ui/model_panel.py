@@ -43,12 +43,13 @@ from core.feature_engineering import build_feature_matrix, get_feature_schema
 from core.instance_correction import fit_instance_bias, summarize_recent_residuals
 from core.model_explanations import TrainingExplanation, build_training_explanation
 from core.pipeline_inspection import build_processing_view_data
+from core.benchmark_ranking_display import format_uncertainty_ranking_explanation_lines
 from core.benchmarking import (
     MODEL_BUNDLE_PRESETS,
     flatten_benchmark_suite_folds,
     run_prediction_benchmark,
 )
-from core.ranking import get_supported_ranking_objectives, rank_benchmark_suite
+from core.ranking import get_supported_ranking_objectives, get_supported_uncertainty_modes, rank_benchmark_suite
 from core.response_models import train_material_models
 from core.model_registry import get_model_availability_summary
 from core.schemas import MaterialDataset
@@ -115,6 +116,8 @@ class ModelPanel(QWidget):
         self._last_benchmark_uncertainty_enabled: bool = False
         self._last_benchmark_ranking_objective: str = "spec_pass_first"
         self._last_benchmark_ranking_weights: dict[str, float] = {}
+        self._last_benchmark_uncertainty_ranking_mode: str = "ignore"
+        self._last_benchmark_uncertainty_ranking_weights: dict[str, float] = {}
         self._last_recommendation_backtest_result: Optional[Any] = None
         self._backtest_thread: Optional[QThread] = None
         self._backtest_worker: Optional[_BacktestWorker] = None
@@ -552,6 +555,48 @@ class ModelPanel(QWidget):
 
         self.bench_ranking_objective_combo.currentTextChanged.connect(_on_objective_changed)
         _on_objective_changed(self.bench_ranking_objective_combo.currentText())
+
+        # Uncertainty ranking mode (Prompt 9.0a): how interval quality affects winner selection.
+        self.bench_uncertainty_ranking_mode_combo = QComboBox()
+        for mode in ("ignore", "warn_only", "include_in_score"):
+            self.bench_uncertainty_ranking_mode_combo.addItem(mode)
+        self.bench_uncertainty_ranking_mode_combo.setCurrentText("ignore")
+        um = get_supported_uncertainty_modes()
+        for i in range(self.bench_uncertainty_ranking_mode_combo.count()):
+            key = self.bench_uncertainty_ranking_mode_combo.itemText(i)
+            tip = str(um.get(key, {}).get("description") or "").strip()
+            if tip:
+                self.bench_uncertainty_ranking_mode_combo.setItemData(i, tip, Qt.ItemDataRole.ToolTipRole)
+        help_lbl = QLabel(
+            "Rank by metrics only; warn without changing rank; or blend interval quality into ranking."
+        )
+        help_lbl.setWordWrap(True)
+        help_lbl.setStyleSheet("color: palette(mid);")
+        unc_rank_row = QVBoxLayout()
+        unc_rank_row.addWidget(self.bench_uncertainty_ranking_mode_combo)
+        unc_rank_row.addWidget(help_lbl)
+        unc_rank_wrap = QWidget()
+        unc_rank_wrap.setLayout(unc_rank_row)
+        benchmark_form.addRow("Uncertainty ranking mode:", unc_rank_wrap)
+
+        self.bench_interval_quality_weight_spin = QDoubleSpinBox()
+        self.bench_interval_quality_weight_spin.setRange(0.0, 1000.0)
+        self.bench_interval_quality_weight_spin.setDecimals(3)
+        self.bench_interval_quality_weight_spin.setSingleStep(0.1)
+        self.bench_interval_quality_weight_spin.setKeyboardTracking(False)
+        self.bench_interval_quality_weight_spin.setValue(1.0)
+
+        def _on_uncertainty_ranking_mode_changed(mode: str) -> None:
+            show_w = mode.strip() == "include_in_score"
+            self.bench_interval_quality_weight_spin.setVisible(show_w)
+            self.bench_interval_quality_weight_spin_label.setVisible(show_w)
+
+        self.bench_interval_quality_weight_spin_label = QLabel("interval_quality weight (weighted combined):")
+        self.bench_interval_quality_weight_spin_label.setVisible(False)
+        self.bench_interval_quality_weight_spin.setVisible(False)
+        self.bench_uncertainty_ranking_mode_combo.currentTextChanged.connect(_on_uncertainty_ranking_mode_changed)
+        _on_uncertainty_ranking_mode_changed(self.bench_uncertainty_ranking_mode_combo.currentText())
+        benchmark_form.addRow(self.bench_interval_quality_weight_spin_label, self.bench_interval_quality_weight_spin)
 
         # Optional uncertainty configuration (conformal interval quality).
         self.bench_uncertainty_enabled_checkbox = QCheckBox("Enable uncertainty (conformal intervals)")
@@ -1879,8 +1924,26 @@ class ModelPanel(QWidget):
                     "Ranking will be deterministic but may be uninformative."
                 )
 
+        uncertainty_mode = (self.bench_uncertainty_ranking_mode_combo.currentText().strip() or "ignore").lower()
+        if uncertainty_mode not in {"ignore", "warn_only", "include_in_score"}:
+            uncertainty_mode = "ignore"
+        uncertainty_weights: Optional[dict[str, float]] = None
+        if uncertainty_mode == "include_in_score":
+            uncertainty_weights = {"interval_quality": float(self.bench_interval_quality_weight_spin.value())}
+
+        conformal_alpha: Optional[float] = None
+        if self._last_benchmark_uncertainty_enabled:
+            conformal_alpha = float(self.bench_uncertainty_alpha_spin.value())
+
         try:
-            ranked = rank_benchmark_suite(suite, objective=objective, weights=weights)
+            ranked = rank_benchmark_suite(
+                suite,
+                objective=objective,
+                weights=weights,
+                uncertainty_mode=uncertainty_mode,
+                uncertainty_weights=uncertainty_weights,
+                conformal_alpha=conformal_alpha,
+            )
         except Exception as exc:
             self.bench_status_label.setText("Ranking failed.")
             self.bench_best_explanation.setPlainText(f"Ranking error: {exc}")
@@ -1890,6 +1953,8 @@ class ModelPanel(QWidget):
         self._last_benchmark_best_bundle = ranked[0]["bundle_name"] if ranked else None
         self._last_benchmark_ranking_objective = objective
         self._last_benchmark_ranking_weights = dict(weights or {})
+        self._last_benchmark_uncertainty_ranking_mode = uncertainty_mode
+        self._last_benchmark_uncertainty_ranking_weights = dict(uncertainty_weights or {})
 
         self._render_benchmark_summary_table(suite)
         self._render_benchmark_fold_table(suite)
@@ -2112,6 +2177,18 @@ class ModelPanel(QWidget):
             lines.append(f"- rsu_mae: {w.get('rsu_mae', 0.0)}")
             if all(abs(float(v)) <= 0.0 for v in w.values()):
                 lines.append("Warning: all weights are zero; combined ranking may be uninformative.")
+
+        umode = self._last_benchmark_uncertainty_ranking_mode or "ignore"
+        lines.append("")
+        lines.extend(
+            format_uncertainty_ranking_explanation_lines(
+                ranked,
+                uncertainty_mode=umode,
+                uncertainty_weights=self._last_benchmark_uncertainty_ranking_weights or None,
+                uncertainty_metrics_enabled=bool(self._last_benchmark_uncertainty_enabled),
+                ranking_objective=obj,
+            )
+        )
 
         lines.append("")
         lines.append(f"Best model bundle: {best_bundle}")
