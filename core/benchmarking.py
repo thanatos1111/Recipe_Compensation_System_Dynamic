@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from core.response_models import evaluate_models_with_splits
+from core.ranking import rank_benchmark_suite
 from core.schemas import BenchmarkFoldResult, BenchmarkSummary, SpecConfig
 
 
@@ -257,45 +258,32 @@ def rank_benchmark_results(
     primary_metric: str = "spec_pass_accuracy",
     secondary_metric: str = "rs_mae",
 ) -> list[dict[str, Any]]:
-    """Rank model bundles using aggregated (mean) metrics across split modes."""
+    """
+    Compatibility wrapper for legacy callers.
 
-    # Aggregate per bundle across all split modes requested.
-    by_bundle: dict[str, list[BenchmarkSummary]] = {}
-    for run in results.runs:
-        by_bundle.setdefault(run.bundle_name, []).append(run.summary)
+    Historically the app ranked with:
+    - primary = spec_pass_accuracy (higher is better)
+    - secondary = rs_mae (lower is better)
 
-    ranked: list[dict[str, Any]] = []
-    for bundle_name, summaries in by_bundle.items():
-        primary_vals = [_get_metric_value(s, primary_metric) for s in summaries]
-        secondary_vals = [_get_metric_value(s, secondary_metric) for s in summaries]
+    New code should prefer `core.ranking.rank_benchmark_suite(..., objective=...)`.
+    """
 
-        def mean_ignore_none(xs: list[Optional[float]]) -> Optional[float]:
-            xs2 = [float(v) for v in xs if v is not None]
-            if not xs2:
-                return None
-            return float(sum(xs2) / len(xs2))
+    # Preserve legacy behavior while routing through the objective backend.
+    if primary_metric == "spec_pass_accuracy" and secondary_metric == "rs_mae":
+        return rank_benchmark_suite(results, objective="spec_pass_first")
+    if primary_metric == "rs_mae" and secondary_metric == "spec_pass_accuracy":
+        return rank_benchmark_suite(results, objective="rs_first")
 
-        ranked.append(
-            {
-                "bundle_name": bundle_name,
-                "primary_mean": mean_ignore_none(primary_vals),
-                "secondary_mean": mean_ignore_none(secondary_vals),
-            }
-        )
+    # Fall back to the closest supported objective when possible.
+    if primary_metric == "thickness_mae" and secondary_metric == "spec_pass_accuracy":
+        return rank_benchmark_suite(results, objective="thickness_first")
+    if primary_metric == "rsu_mae" and secondary_metric == "spec_pass_accuracy":
+        return rank_benchmark_suite(results, objective="rsu_first")
 
-    # spec_pass_accuracy: higher is better; mae: lower is better.
-    def sort_key(item: dict[str, Any]) -> tuple[float, float, str]:
-        p = item.get("primary_mean")
-        s = item.get("secondary_mean")
-        p_val = float(p) if p is not None else float("-inf")
-        # Make sure None secondary goes to the end by treating it as +inf.
-        s_val = float(s) if s is not None else float("inf")
-
-        # We want descending primary, ascending secondary.
-        return (-p_val, s_val, str(item.get("bundle_name")))
-
-    ranked_sorted = sorted(ranked, key=sort_key)
-    return ranked_sorted
+    raise ValueError(
+        "Unsupported legacy ranking metrics. Use core.ranking.rank_benchmark_suite "
+        "with an explicit objective instead."
+    )
 
 
 def flatten_benchmark_suite_folds(results: BenchmarkSuiteResult) -> list[dict[str, Any]]:

@@ -46,9 +46,9 @@ from core.pipeline_inspection import build_processing_view_data
 from core.benchmarking import (
     MODEL_BUNDLE_PRESETS,
     flatten_benchmark_suite_folds,
-    rank_benchmark_results,
     run_prediction_benchmark,
 )
+from core.ranking import get_supported_ranking_objectives, rank_benchmark_suite
 from core.response_models import train_material_models
 from core.model_registry import get_model_availability_summary
 from core.schemas import MaterialDataset
@@ -113,6 +113,8 @@ class ModelPanel(QWidget):
         self._last_benchmark_ranked: list[dict[str, Any]] = []
         self._last_benchmark_best_bundle: Optional[str] = None
         self._last_benchmark_uncertainty_enabled: bool = False
+        self._last_benchmark_ranking_objective: str = "spec_pass_first"
+        self._last_benchmark_ranking_weights: dict[str, float] = {}
         self._last_recommendation_backtest_result: Optional[Any] = None
         self._backtest_thread: Optional[QThread] = None
         self._backtest_worker: Optional[_BacktestWorker] = None
@@ -511,6 +513,45 @@ class ModelPanel(QWidget):
         self.bench_chart_metric_combo = QComboBox()
         self.bench_chart_metric_combo.addItems(["RS MAE", "Thickness MAE", "RSU MAE", "Spec pass accuracy"])
         benchmark_form.addRow("Chart metric:", self.bench_chart_metric_combo)
+
+        # Ranking objective controls (Prompt 8.1).
+        self.bench_ranking_objective_combo = QComboBox()
+        self.bench_ranking_objective_combo.addItems(
+            ["spec_pass_first", "rs_first", "thickness_first", "rsu_first", "weighted_combined"]
+        )
+        self.bench_ranking_objective_combo.setCurrentText("spec_pass_first")
+        benchmark_form.addRow("Ranking objective:", self.bench_ranking_objective_combo)
+
+        self.bench_weighted_config_box = QGroupBox("Weighted score configuration")
+        weighted_form = QFormLayout()
+        weighted_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        def _make_weight_spin(default: float) -> QDoubleSpinBox:
+            sp = QDoubleSpinBox()
+            sp.setRange(0.0, 1000.0)
+            sp.setDecimals(3)
+            sp.setSingleStep(0.1)
+            sp.setKeyboardTracking(False)
+            sp.setValue(float(default))
+            return sp
+
+        self.bench_weight_spec_pass_spin = _make_weight_spin(1.0)
+        self.bench_weight_rs_mae_spin = _make_weight_spin(1.0)
+        self.bench_weight_thickness_mae_spin = _make_weight_spin(1.0)
+        self.bench_weight_rsu_mae_spin = _make_weight_spin(1.0)
+
+        weighted_form.addRow("spec_pass_accuracy weight:", self.bench_weight_spec_pass_spin)
+        weighted_form.addRow("rs_mae weight:", self.bench_weight_rs_mae_spin)
+        weighted_form.addRow("thickness_mae weight:", self.bench_weight_thickness_mae_spin)
+        weighted_form.addRow("rsu_mae weight:", self.bench_weight_rsu_mae_spin)
+        self.bench_weighted_config_box.setLayout(weighted_form)
+        benchmark_form.addRow(self.bench_weighted_config_box)
+
+        def _on_objective_changed(obj: str) -> None:
+            self.bench_weighted_config_box.setVisible(obj.strip() == "weighted_combined")
+
+        self.bench_ranking_objective_combo.currentTextChanged.connect(_on_objective_changed)
+        _on_objective_changed(self.bench_ranking_objective_combo.currentText())
 
         # Optional uncertainty configuration (conformal interval quality).
         self.bench_uncertainty_enabled_checkbox = QCheckBox("Enable uncertainty (conformal intervals)")
@@ -1822,15 +1863,41 @@ class ModelPanel(QWidget):
         self.bench_run_button.setEnabled(True)
 
         self._last_benchmark_suite_results = suite
-        ranked = rank_benchmark_results(suite, primary_metric="spec_pass_accuracy", secondary_metric="rs_mae")
+        objective = self.bench_ranking_objective_combo.currentText().strip() or "spec_pass_first"
+        weights: Optional[dict[str, float]] = None
+        weight_warning = ""
+        if objective == "weighted_combined":
+            weights = {
+                "spec_pass_accuracy": float(self.bench_weight_spec_pass_spin.value()),
+                "rs_mae": float(self.bench_weight_rs_mae_spin.value()),
+                "thickness_mae": float(self.bench_weight_thickness_mae_spin.value()),
+                "rsu_mae": float(self.bench_weight_rsu_mae_spin.value()),
+            }
+            if all(abs(float(v)) <= 0.0 for v in weights.values()):
+                weight_warning = (
+                    "Weighted combined selected, but all weights are zero. "
+                    "Ranking will be deterministic but may be uninformative."
+                )
+
+        try:
+            ranked = rank_benchmark_suite(suite, objective=objective, weights=weights)
+        except Exception as exc:
+            self.bench_status_label.setText("Ranking failed.")
+            self.bench_best_explanation.setPlainText(f"Ranking error: {exc}")
+            return
+
         self._last_benchmark_ranked = ranked
         self._last_benchmark_best_bundle = ranked[0]["bundle_name"] if ranked else None
+        self._last_benchmark_ranking_objective = objective
+        self._last_benchmark_ranking_weights = dict(weights or {})
 
         self._render_benchmark_summary_table(suite)
         self._render_benchmark_fold_table(suite)
         self._render_benchmark_chart(suite)
         self._render_benchmark_best_explanation(suite, ranked)
         self._render_benchmark_warning_summary(suite)
+        if weight_warning:
+            self.bench_status_label.setText(weight_warning)
 
         # Optional recommendation backtest.
         if self.bench_backtest_enabled_checkbox.isChecked():
@@ -2024,14 +2091,50 @@ class ModelPanel(QWidget):
             self.bench_best_explanation.setPlainText("Best bundle not found in suite runs.")
             return
 
+        obj = self._last_benchmark_ranking_objective or "spec_pass_first"
+        meta = get_supported_ranking_objectives().get(obj, {})
+
+        lines: list[str] = []
+        lines.append(f"Ranking objective: {obj}")
+        dn = str(meta.get("display_name") or "").strip()
+        desc = str(meta.get("description") or "").strip()
+        if dn:
+            lines.append(f"- {dn}")
+        if desc:
+            lines.append(f"- {desc}")
+
+        if obj == "weighted_combined":
+            w = dict(self._last_benchmark_ranking_weights or {})
+            lines.append("Weights:")
+            lines.append(f"- spec_pass_accuracy: {w.get('spec_pass_accuracy', 0.0)}")
+            lines.append(f"- rs_mae: {w.get('rs_mae', 0.0)}")
+            lines.append(f"- thickness_mae: {w.get('thickness_mae', 0.0)}")
+            lines.append(f"- rsu_mae: {w.get('rsu_mae', 0.0)}")
+            if all(abs(float(v)) <= 0.0 for v in w.values()):
+                lines.append("Warning: all weights are zero; combined ranking may be uninformative.")
+
+        lines.append("")
+        lines.append(f"Best model bundle: {best_bundle}")
+
         primary = ranked[0].get("primary_mean")
         secondary = ranked[0].get("secondary_mean")
-        lines = [
-            f"Best model bundle: {best_bundle}",
-            f"Primary metric (spec-pass accuracy mean): {primary if primary is not None else '-'}",
-            f"Secondary metric (RS MAE mean): {secondary if secondary is not None else '-'}",
-            f"Fold count: {len(best_run.summary.folds)}",
-        ]
+        if obj == "spec_pass_first":
+            lines.append(f"Primary metric (spec-pass accuracy mean): {primary if primary is not None else '-'}")
+            lines.append(f"Secondary metric (RS MAE mean): {secondary if secondary is not None else '-'}")
+        elif obj == "rs_first":
+            lines.append(f"Primary metric (RS MAE mean): {primary if primary is not None else '-'}")
+            lines.append(f"Secondary metric (spec-pass accuracy mean): {secondary if secondary is not None else '-'}")
+        elif obj == "thickness_first":
+            lines.append(f"Primary metric (Thickness MAE mean): {primary if primary is not None else '-'}")
+            lines.append(f"Secondary metric (spec-pass accuracy mean): {secondary if secondary is not None else '-'}")
+        elif obj == "rsu_first":
+            lines.append(f"Primary metric (RSU MAE mean): {primary if primary is not None else '-'}")
+            lines.append(f"Secondary metric (spec-pass accuracy mean): {secondary if secondary is not None else '-'}")
+        elif obj == "weighted_combined":
+            ws = ranked[0].get("weighted_score")
+            lines.append(f"Weighted score: {ws if ws is not None else '-'}")
+
+        lines.append(f"Fold count: {len(best_run.summary.folds)}")
 
         # Tradeoff vs second best (same primary metric ordering).
         if second_run is not None and second_bundle is not None:
@@ -2039,9 +2142,13 @@ class ModelPanel(QWidget):
             sec_secondary = ranked[1].get("secondary_mean")
             lines.append("")
             lines.append(f"Runner-up: {second_bundle}")
-            lines.append(
-                f"Runner-up primary={sec_primary if sec_primary is not None else '-'}, secondary(RS MAE)={sec_secondary if sec_secondary is not None else '-'}"
-            )
+            if obj == "weighted_combined":
+                sec_ws = ranked[1].get("weighted_score")
+                lines.append(f"Runner-up weighted_score={sec_ws if sec_ws is not None else '-'}")
+            else:
+                lines.append(
+                    f"Runner-up primary={sec_primary if sec_primary is not None else '-'}, secondary={sec_secondary if sec_secondary is not None else '-'}"
+                )
 
         # Confidence heuristic: small test sets lower trust.
         if best_run.summary.folds:
