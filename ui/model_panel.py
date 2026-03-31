@@ -13,6 +13,7 @@ import pandas as pd
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -79,6 +80,8 @@ from core.ranking import get_supported_ranking_objectives, get_supported_uncerta
 from core.response_models import train_material_models
 from core.model_registry import get_model_availability_summary
 from core.schemas import MaterialDataset
+from core.auto_decision import AutoDecisionResult, run_auto_model_selection
+from core.auto_decision_goals import apply_goal_preset_to_settings, get_auto_decision_goal_presets
 from ui.bundle_editor_dialog import BundleEditorDialog
 
 try:
@@ -129,6 +132,22 @@ class _NoPropagateWheelListWidget(QListWidget):
         except Exception:
             pass
         # Do not call super().wheelEvent(event) (it can propagate at edges).
+
+
+class _NoPropagateWheelTextEdit(QTextEdit):
+    """
+    QTextEdit that accepts wheel events so the parent scroll container
+    doesn't also scroll while the cursor is over the report.
+    """
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        try:
+            super().wheelEvent(event)
+        finally:
+            try:
+                event.accept()
+            except Exception:
+                pass
 
 
 class _EvalWorker(QObject):
@@ -190,6 +209,11 @@ class ModelPanel(QWidget):
         self._last_benchmark_uncertainty_ranking_mode: str = "ignore"
         self._last_benchmark_uncertainty_ranking_weights: dict[str, float] = {}
         self._last_recommendation_backtest_result: Optional[Any] = None
+        self._last_auto_decision_result: Optional[AutoDecisionResult] = None
+        self._last_auto_decision_winner: Optional[str] = None
+        self._auto_decision_thread: Optional[QThread] = None
+        self._auto_decision_worker: Optional[QObject] = None
+        self._auto_decision_abort_event: Optional[threading.Event] = None
         self._backtest_thread: Optional[QThread] = None
         self._backtest_worker: Optional[_BacktestWorker] = None
         self._backtest_abort_event: Optional[threading.Event] = None
@@ -766,6 +790,146 @@ class ModelPanel(QWidget):
         benchmark_controls_box.setLayout(benchmark_form)
         benchmark_layout.addWidget(benchmark_controls_box)
 
+        # Auto decision engine (Prompt 11.1) - separate workflow.
+        auto_box = QGroupBox("Auto decision engine")
+        auto_form = QFormLayout()
+        auto_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        auto_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        auto_form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+
+        auto_help = QLabel(
+            "Automated assistant workflow: inspects the selected material's data regime, "
+            "chooses valid split modes, benchmarks bundles in stages, and recommends a winner. "
+            "It will not overwrite manual benchmark results unless you explicitly adopt the winner."
+        )
+        auto_help.setWordWrap(True)
+        auto_help.setStyleSheet("color: palette(mid);")
+        auto_form.addRow(auto_help)
+
+        # Goal preset selector.
+        self.auto_goal_preset_combo = QComboBox()
+        self._auto_goal_presets = get_auto_decision_goal_presets()
+        for p in self._auto_goal_presets:
+            self.auto_goal_preset_combo.addItem(p.display_name, userData=p.key)
+        auto_form.addRow("Goal preset:", self.auto_goal_preset_combo)
+
+        # Goal controls: ranking objective + uncertainty ranking mode.
+        self.auto_ranking_objective_combo = QComboBox()
+        self.auto_ranking_objective_combo.addItems(
+            ["spec_pass_first", "rs_first", "thickness_first", "rsu_first", "weighted_combined"]
+        )
+        self.auto_ranking_objective_combo.setCurrentText("spec_pass_first")
+        auto_form.addRow("Ranking objective:", self.auto_ranking_objective_combo)
+
+        self.auto_uncertainty_ranking_mode_combo = QComboBox()
+        for mode in ("ignore", "warn_only", "include_in_score"):
+            self.auto_uncertainty_ranking_mode_combo.addItem(mode)
+        self.auto_uncertainty_ranking_mode_combo.setCurrentText("ignore")
+        auto_form.addRow("Uncertainty mode:", self.auto_uncertainty_ranking_mode_combo)
+
+        # Weighted combined config (mirrors manual benchmark controls).
+        self.auto_weighted_config_box = QGroupBox("Weighted score configuration")
+        auto_weighted_form = QFormLayout()
+        auto_weighted_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        def _make_weight_spin_auto(default: float) -> QDoubleSpinBox:
+            sp = QDoubleSpinBox()
+            sp.setRange(0.0, 1000.0)
+            sp.setDecimals(3)
+            sp.setSingleStep(0.1)
+            sp.setKeyboardTracking(False)
+            sp.setValue(float(default))
+            return sp
+
+        self.auto_weight_spec_pass_spin = _make_weight_spin_auto(1.0)
+        self.auto_weight_rs_mae_spin = _make_weight_spin_auto(1.0)
+        self.auto_weight_thickness_mae_spin = _make_weight_spin_auto(1.0)
+        self.auto_weight_rsu_mae_spin = _make_weight_spin_auto(1.0)
+        auto_weighted_form.addRow("spec_pass_accuracy weight:", self.auto_weight_spec_pass_spin)
+        auto_weighted_form.addRow("rs_mae weight:", self.auto_weight_rs_mae_spin)
+        auto_weighted_form.addRow("thickness_mae weight:", self.auto_weight_thickness_mae_spin)
+        auto_weighted_form.addRow("rsu_mae weight:", self.auto_weight_rsu_mae_spin)
+        self.auto_weighted_config_box.setLayout(auto_weighted_form)
+        auto_form.addRow(self.auto_weighted_config_box)
+
+        def _on_auto_objective_changed(obj: str) -> None:
+            self.auto_weighted_config_box.setVisible(obj.strip() == "weighted_combined")
+
+        self.auto_ranking_objective_combo.currentTextChanged.connect(_on_auto_objective_changed)
+        _on_auto_objective_changed(self.auto_ranking_objective_combo.currentText())
+
+        # Optional interval metrics (needed for include_in_score to have real interval inputs).
+        self.auto_uncertainty_enabled_checkbox = QCheckBox("Enable uncertainty (conformal intervals)")
+        self.auto_uncertainty_enabled_checkbox.setChecked(False)
+        self.auto_uncertainty_alpha_spin = QDoubleSpinBox()
+        self.auto_uncertainty_alpha_spin.setRange(0.01, 0.5)
+        self.auto_uncertainty_alpha_spin.setDecimals(3)
+        self.auto_uncertainty_alpha_spin.setKeyboardTracking(False)
+        self.auto_uncertainty_alpha_spin.setValue(0.1)
+        self.auto_uncertainty_calib_frac_spin = QDoubleSpinBox()
+        self.auto_uncertainty_calib_frac_spin.setRange(0.05, 0.8)
+        self.auto_uncertainty_calib_frac_spin.setDecimals(3)
+        self.auto_uncertainty_calib_frac_spin.setKeyboardTracking(False)
+        self.auto_uncertainty_calib_frac_spin.setValue(0.2)
+
+        def _on_auto_uncertainty_toggled(checked: bool) -> None:
+            self.auto_uncertainty_alpha_spin.setEnabled(checked)
+            self.auto_uncertainty_calib_frac_spin.setEnabled(checked)
+
+        self.auto_uncertainty_enabled_checkbox.toggled.connect(_on_auto_uncertainty_toggled)
+        _on_auto_uncertainty_toggled(False)
+        auto_form.addRow(self.auto_uncertainty_enabled_checkbox)
+        auto_form.addRow("Conformal alpha:", self.auto_uncertainty_alpha_spin)
+        auto_form.addRow("Calibration fraction:", self.auto_uncertainty_calib_frac_spin)
+
+        # Bundle scope: all vs selected.
+        self.auto_bundle_scope_combo = QComboBox()
+        self.auto_bundle_scope_combo.addItems(["all available bundles", "selected bundles only"])
+        auto_form.addRow("Bundle scope:", self.auto_bundle_scope_combo)
+
+        auto_action_row = QHBoxLayout()
+        self.auto_run_button = QPushButton("Run auto model selection")
+        self.auto_run_button.clicked.connect(self._auto_decision_run_clicked)
+        self.auto_status_label = QLabel("")
+        auto_action_row.addWidget(self.auto_run_button)
+        auto_action_row.addWidget(self.auto_status_label)
+        self.auto_progress = QProgressBar()
+        self.auto_progress.setRange(0, 100)
+        self.auto_progress.setValue(0)
+        self.auto_progress.setTextVisible(True)
+        self.auto_progress.setFormat("%p%")
+        self.auto_progress.setVisible(False)
+        auto_action_row.addWidget(self.auto_progress)
+
+        self.auto_abort_button = QPushButton("Abort")
+        self.auto_abort_button.setEnabled(False)
+        self.auto_abort_button.clicked.connect(self._auto_decision_abort_clicked)
+        auto_action_row.addWidget(self.auto_abort_button)
+        auto_action_row.addStretch(1)
+        auto_form.addRow(auto_action_row)
+
+        # Results display.
+        self.auto_result_text = _NoPropagateWheelTextEdit()
+        self.auto_result_text.setReadOnly(True)
+        self.auto_result_text.setMinimumHeight(140)
+        self.auto_result_text.setPlaceholderText("Run auto model selection to see regime, split modes, winner, and explanation.")
+        auto_form.addRow("Result:", self.auto_result_text)
+
+        auto_buttons_row = QHBoxLayout()
+        self.auto_adopt_winner_button = QPushButton("Adopt auto-selected winner")
+        self.auto_adopt_winner_button.setEnabled(False)
+        self.auto_adopt_winner_button.clicked.connect(self._auto_decision_adopt_winner_clicked)
+        self.auto_copy_report_button = QPushButton("Copy auto decision report")
+        self.auto_copy_report_button.setEnabled(False)
+        self.auto_copy_report_button.clicked.connect(self._auto_decision_copy_report_clicked)
+        auto_buttons_row.addWidget(self.auto_adopt_winner_button)
+        auto_buttons_row.addWidget(self.auto_copy_report_button)
+        auto_buttons_row.addStretch(1)
+        auto_form.addRow(auto_buttons_row)
+
+        auto_box.setLayout(auto_form)
+        benchmark_layout.addWidget(auto_box)
+
         # Model availability summary (external boosted models are optional).
         benchmark_availability_group = QGroupBox("Model availability")
         availability_layout = QVBoxLayout()
@@ -908,6 +1072,10 @@ class ModelPanel(QWidget):
 
         self.setLayout(layout)
 
+        # Apply initial auto-goal preset (default first entry).
+        self.auto_goal_preset_combo.currentIndexChanged.connect(self._auto_decision_goal_preset_changed)
+        self._auto_decision_goal_preset_changed(self.auto_goal_preset_combo.currentIndex())
+
     def set_context(self, material_dataset: MaterialDataset, *, active_target_id: str, config: dict[str, Any]) -> None:
         self._material_dataset = material_dataset
         self._active_target_id = active_target_id
@@ -927,6 +1095,18 @@ class ModelPanel(QWidget):
         self._refresh_processing_view()
         self._refresh_model_pipeline_view()
         self._refresh_benchmark_active_target_combo(active_target_id=active_target_id, target_ids=target_ids)
+
+        # Auto decision is regime-aware and depends on the current material; clear stale results.
+        self._last_auto_decision_result = None
+        self._last_auto_decision_winner = None
+        if hasattr(self, "auto_result_text"):
+            self.auto_result_text.setPlainText("")
+        if hasattr(self, "auto_status_label"):
+            self.auto_status_label.setText("")
+        if hasattr(self, "auto_adopt_winner_button"):
+            self.auto_adopt_winner_button.setEnabled(False)
+        if hasattr(self, "auto_copy_report_button"):
+            self.auto_copy_report_button.setEnabled(False)
 
     def _train_clicked(self) -> None:
         if self._material_dataset is None:
@@ -2293,6 +2473,320 @@ class ModelPanel(QWidget):
         self._config["model_settings"] = ms
 
         self.bench_status_label.setText(f"Winner adopted: {winner}. Click Train to retrain.")
+
+    # -----------------------
+    # Auto decision engine (Prompt 11.1)
+    # -----------------------
+
+    def _auto_decision_goal_preset_changed(self, _index: int) -> None:
+        if not hasattr(self, "auto_goal_preset_combo"):
+            return
+        key = self.auto_goal_preset_combo.currentData()
+        settings = apply_goal_preset_to_settings(str(key or ""), current_settings={})
+        if not settings:
+            return
+
+        obj = str(settings.get("ranking_objective") or "spec_pass_first")
+        umode = str(settings.get("uncertainty_mode") or "ignore")
+        self.auto_ranking_objective_combo.setCurrentText(obj)
+        self.auto_uncertainty_ranking_mode_combo.setCurrentText(umode)
+
+        unc_enabled = bool(settings.get("uncertainty_enabled", False))
+        self.auto_uncertainty_enabled_checkbox.setChecked(unc_enabled)
+        try:
+            self.auto_uncertainty_alpha_spin.setValue(float(settings.get("conformal_alpha", 0.1)))
+        except Exception:
+            pass
+        try:
+            self.auto_uncertainty_calib_frac_spin.setValue(float(settings.get("calibration_fraction", 0.2)))
+        except Exception:
+            pass
+
+        w = settings.get("ranking_weights") or {}
+        if isinstance(w, dict) and obj == "weighted_combined":
+            try:
+                self.auto_weight_spec_pass_spin.setValue(float(w.get("spec_pass_accuracy", 1.0)))
+                self.auto_weight_rs_mae_spin.setValue(float(w.get("rs_mae", 1.0)))
+                self.auto_weight_thickness_mae_spin.setValue(float(w.get("thickness_mae", 1.0)))
+                self.auto_weight_rsu_mae_spin.setValue(float(w.get("rsu_mae", 1.0)))
+            except Exception:
+                pass
+
+        if hasattr(self, "auto_status_label"):
+            # Show a compact description for clarity.
+            desc = ""
+            for p in getattr(self, "_auto_goal_presets", []) or []:
+                if getattr(p, "key", None) == str(key or ""):
+                    desc = str(getattr(p, "description", "") or "").strip()
+                    break
+            self.auto_status_label.setText(desc)
+
+    def _auto_decision_run_clicked(self) -> None:
+        if self._material_dataset is None:
+            self.auto_status_label.setText("No material selected.")
+            return
+
+        df_all = self._material_dataset.all_records
+        if df_all is None or df_all.empty:
+            self.auto_status_label.setText("No rows available for auto decision.")
+            return
+
+        # Keep auto-decision material-local but allow the same target filter used elsewhere in this panel.
+        selected_targets = self._selected_targets_from_widget(self.training_targets_list)
+        if selected_targets:
+            df = df_all[df_all["target_id"].astype(str).isin(selected_targets)].copy()
+        else:
+            df = df_all
+        if df is None or df.empty:
+            self.auto_status_label.setText("No rows available after target filtering.")
+            return
+
+        # Assemble an auto-decision config without mutating the deployment config.
+        auto_cfg = dict(self._config)
+        auto_cfg["spec_config"] = self._material_dataset.spec_config
+
+        bs = dict(auto_cfg.get("benchmark_settings") or {})
+        # Keep split defaults compatible with existing benchmark runners.
+        bs.setdefault("forward_chaining", {"n_splits": 1, "min_train_rows": 10, "min_test_rows": 4})
+        bs.setdefault("leave_one_target_out", {"min_train_rows": 10, "min_test_rows": 3})
+        bs.setdefault("active_target_cutoff", {})
+        bs["active_target_cutoff"] = {
+            **dict(bs.get("active_target_cutoff") or {}),
+            "active_target_id": self.bench_active_target_combo.currentText().strip(),
+            "cutoff_lifetime": float(self.bench_cutoff_spin.value()),
+            "history_target_ids": tuple(bs.get("active_target_cutoff", {}).get("history_target_ids") or ()),
+        }
+
+        # Ranking goals.
+        obj = self.auto_ranking_objective_combo.currentText().strip() or "spec_pass_first"
+        umode = (self.auto_uncertainty_ranking_mode_combo.currentText().strip() or "ignore").lower()
+        if umode not in {"ignore", "warn_only", "include_in_score"}:
+            umode = "ignore"
+        bs["ranking_objective"] = obj
+        bs["uncertainty_mode"] = umode
+
+        if obj == "weighted_combined":
+            bs["ranking_weights"] = {
+                "spec_pass_accuracy": float(self.auto_weight_spec_pass_spin.value()),
+                "rs_mae": float(self.auto_weight_rs_mae_spin.value()),
+                "thickness_mae": float(self.auto_weight_thickness_mae_spin.value()),
+                "rsu_mae": float(self.auto_weight_rsu_mae_spin.value()),
+            }
+        else:
+            bs.pop("ranking_weights", None)
+
+        # Interval metrics settings (optional).
+        if self.auto_uncertainty_enabled_checkbox.isChecked():
+            bs["uncertainty"] = {
+                "enabled": True,
+                "alpha": float(self.auto_uncertainty_alpha_spin.value()),
+                "calibration_fraction": float(self.auto_uncertainty_calib_frac_spin.value()),
+                "min_calibration_rows": 5,
+            }
+        else:
+            bs.pop("uncertainty", None)
+
+        auto_cfg["benchmark_settings"] = bs
+
+        # Bundle scope.
+        ad = dict(auto_cfg.get("auto_decision") or {})
+        # Suggested shortlist size from preset (if set), otherwise default 3.
+        try:
+            preset_key = str(self.auto_goal_preset_combo.currentData() or "")
+            preset_settings = apply_goal_preset_to_settings(preset_key, current_settings={})
+            if "shortlist_size" in preset_settings:
+                ad["shortlist_size"] = int(preset_settings["shortlist_size"])
+        except Exception:
+            pass
+
+        scope = self.auto_bundle_scope_combo.currentText().strip().lower()
+        if "selected" in scope:
+            selected_bundles = self._selected_targets_from_widget(self.bench_bundle_list)
+            if not selected_bundles:
+                self.auto_status_label.setText("Select bundles (or switch scope to all available).")
+                return
+            ad["bundle_allowlist"] = list(selected_bundles)
+        else:
+            ad.pop("bundle_allowlist", None)
+        auto_cfg["auto_decision"] = ad
+
+        self._start_auto_decision_worker(df, auto_cfg)
+
+    def _auto_decision_adopt_winner_clicked(self) -> None:
+        if self._last_auto_decision_result is None or not self._last_auto_decision_result.winner:
+            self.auto_status_label.setText("Run auto decision first to adopt a winner.")
+            return
+        winner = str(self._last_auto_decision_result.winner)
+        effective_bundles = get_effective_model_bundles(self._config)
+        chosen = effective_bundles.get(winner)
+        if not chosen:
+            self.auto_status_label.setText("Winner bundle not found.")
+            return
+
+        ms = dict(self._config.get("model_settings") or {})
+        ms["rs_model"] = chosen["rs"]
+        ms["thickness_model"] = chosen["thickness"]
+        ms["rsu_model"] = chosen["rsu"]
+        self._config["model_settings"] = ms
+        self.auto_status_label.setText(f"Winner adopted: {winner}. Click Train to retrain.")
+
+    def _auto_decision_copy_report_clicked(self) -> None:
+        text = ""
+        if hasattr(self, "auto_result_text"):
+            text = self.auto_result_text.toPlainText()
+        if not text.strip():
+            self.auto_status_label.setText("Nothing to copy yet.")
+            return
+        cb = QApplication.clipboard()
+        if cb is None:
+            self.auto_status_label.setText("Clipboard not available.")
+            return
+        cb.setText(text)
+        self.auto_status_label.setText("Copied report to clipboard.")
+
+    def _auto_decision_abort_clicked(self) -> None:
+        if self._auto_decision_abort_event is None:
+            return
+        self._auto_decision_abort_event.set()
+        self.auto_abort_button.setEnabled(False)
+        self.auto_status_label.setText("Abort requested...")
+
+    def _start_auto_decision_worker(self, df: pd.DataFrame, auto_cfg: dict[str, Any]) -> None:
+        # Avoid overlapping runs.
+        if self._auto_decision_thread is not None:
+            self.auto_status_label.setText("Auto decision already running.")
+            return
+
+        self._auto_decision_abort_event = threading.Event()
+
+        class _AutoDecisionWorker(QObject):
+            finished = Signal(object)
+            failed = Signal(str)
+            progress = Signal(int, str)
+
+            def __init__(self, *, df: pd.DataFrame, config: dict[str, Any], abort_event: Any) -> None:
+                super().__init__()
+                self._df = df
+                self._config = config
+                self._abort_event = abort_event
+
+            def run(self) -> None:
+                try:
+                    def _progress_cb(pct: int, stage: str) -> None:
+                        self.progress.emit(int(pct), str(stage))
+
+                    cfg = dict(self._config)
+                    # Pass hooks via reserved internal keys (kept out of user config persistence).
+                    cfg["_auto_decision_abort_event"] = self._abort_event
+                    cfg["_auto_decision_progress_cb"] = _progress_cb
+                    result = run_auto_model_selection(self._df, cfg)
+                    self.finished.emit(result)
+                except Exception as exc:
+                    self.failed.emit(str(exc))
+
+        self._auto_decision_thread = QThread()
+        self._auto_decision_worker = _AutoDecisionWorker(df=df, config=auto_cfg, abort_event=self._auto_decision_abort_event)
+        self._auto_decision_worker.moveToThread(self._auto_decision_thread)
+        self._auto_decision_thread.started.connect(getattr(self._auto_decision_worker, "run"))
+        getattr(self._auto_decision_worker, "finished").connect(self._on_auto_decision_finished)
+        getattr(self._auto_decision_worker, "failed").connect(self._on_auto_decision_failed)
+        getattr(self._auto_decision_worker, "progress").connect(self._on_auto_decision_progress)
+        getattr(self._auto_decision_worker, "finished").connect(self._auto_decision_thread.quit)
+        getattr(self._auto_decision_worker, "failed").connect(self._auto_decision_thread.quit)
+        self._auto_decision_thread.finished.connect(self._cleanup_auto_decision_worker)
+
+        self.auto_status_label.setText("Running auto model selection...")
+        self.auto_run_button.setEnabled(False)
+        self.auto_abort_button.setEnabled(True)
+        self.auto_progress.setVisible(True)
+        self.auto_progress.setRange(0, 0)  # indeterminate until we get % updates
+        self.auto_progress.setValue(0)
+        self.auto_adopt_winner_button.setEnabled(False)
+        self.auto_copy_report_button.setEnabled(False)
+        self._auto_decision_thread.start()
+
+    def _on_auto_decision_progress(self, pct: int, stage: str) -> None:
+        # pct < 0 => indeterminate
+        if pct < 0:
+            self.auto_progress.setRange(0, 0)
+        else:
+            if self.auto_progress.minimum() == 0 and self.auto_progress.maximum() == 0:
+                self.auto_progress.setRange(0, 100)
+            self.auto_progress.setValue(int(max(0, min(100, pct))))
+        if stage:
+            self.auto_status_label.setText(stage)
+
+    def _on_auto_decision_finished(self, out: Any) -> None:
+        self._last_auto_decision_result = out if isinstance(out, AutoDecisionResult) else None
+        self._last_auto_decision_winner = getattr(out, "winner", None)
+        self.auto_adopt_winner_button.setEnabled(bool(getattr(out, "winner", None)))
+        self.auto_copy_report_button.setEnabled(True)
+
+        self.auto_run_button.setEnabled(True)
+        self.auto_abort_button.setEnabled(False)
+        self.auto_progress.setRange(0, 100)
+        self.auto_progress.setValue(100)
+
+        # Render report (same content as before).
+        if not isinstance(out, AutoDecisionResult):
+            self.auto_result_text.setPlainText("Auto decision completed, but result was not recognized.")
+            self.auto_status_label.setText("Completed.")
+            return
+
+        lines: list[str] = []
+        lines.append("Auto decision engine report")
+        lines.append("")
+        lines.append(f"Detected regime: {out.detected_regime.regime_label}")
+        lines.append(f"- rows: {out.detected_regime.total_rows}")
+        lines.append(f"- targets: {out.detected_regime.target_count}")
+        lines.append(f"- split modes used: {out.split_modes_used}")
+
+        skipped = {k: v for k, v in (out.excluded_reasons or {}).items() if str(k).startswith("split:")}
+        if skipped:
+            lines.append("")
+            lines.append("Skipped split modes:")
+            for k, v in sorted(skipped.items()):
+                lines.append(f"- {k.replace('split:', '')}: {v}")
+
+        lines.append("")
+        lines.append(f"Bundles evaluated: {out.bundles_evaluated}")
+        lines.append(f"Shortlist: {out.shortlisted_bundles}")
+        lines.append("")
+        lines.append(f"Winner: {out.winner}")
+        lines.append(f"Runner-up: {out.runner_up}")
+        lines.append(f"Confidence level: {out.confidence_level}")
+        lines.append("")
+        lines.append("Explanation:")
+        lines.append(out.explanation_text.strip() if out.explanation_text else "-")
+
+        lines.append("")
+        lines.append("Suggested next action:")
+        if out.winner:
+            lines.append("- Adopt winner (button below) and then click Train to retrain.")
+            lines.append("- Or keep manual review: run a manual benchmark with your chosen split mode and bundles.")
+        else:
+            lines.append("- Keep manual review: run manual benchmark and inspect results.")
+
+        self.auto_result_text.setPlainText("\n".join(lines))
+        self.auto_status_label.setText("Completed.")
+
+    def _on_auto_decision_failed(self, message: str) -> None:
+        self._last_auto_decision_result = None
+        self._last_auto_decision_winner = None
+        self.auto_run_button.setEnabled(True)
+        self.auto_abort_button.setEnabled(False)
+        self.auto_progress.setVisible(False)
+        self.auto_result_text.setPlainText(f"Auto decision failed: {message}")
+        self.auto_status_label.setText("Failed.")
+
+    def _cleanup_auto_decision_worker(self) -> None:
+        if self._auto_decision_worker is not None:
+            self._auto_decision_worker.deleteLater()
+        self._auto_decision_worker = None
+        if self._auto_decision_thread is not None:
+            self._auto_decision_thread.deleteLater()
+        self._auto_decision_thread = None
+        self._auto_decision_abort_event = None
 
     def _render_benchmark_summary_table(self, suite: Any) -> None:
         rows = suite.to_table_rows()
