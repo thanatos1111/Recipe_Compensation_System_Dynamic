@@ -4,7 +4,15 @@ import numpy as np
 import pandas as pd
 
 from core.auto_decision import build_auto_evaluation_plan, run_auto_model_selection
+from core.auto_decision import (
+    _build_explanation,
+    render_auto_decision_report_text,
+    score_auto_decision_candidates,
+    DECISION_MODE_RECOMMENDATION_FIRST,
+)
 from core.benchmarking import MODEL_BUNDLE_PRESETS
+from core.data_regime import DataRegime
+from core.recommendation_backtest import RecommendationBacktestResult, RecommendationBacktestSummary
 from core.schemas import SpecConfig
 
 
@@ -99,6 +107,193 @@ class TestAutoDecision(unittest.TestCase):
         self.assertIn("baseline_linear", MODEL_BUNDLE_PRESETS)
         out = run_auto_model_selection(df, cfg)
         self.assertEqual(out.bundles_evaluated, ["baseline_linear"])
+
+    def test_recommendation_first_ranks_by_backtest_predicted_spec_improvement(self) -> None:
+        ranked = [
+            {"bundle_name": "A", "primary_mean": 0.1, "secondary_mean": 0.2},
+            {"bundle_name": "B", "primary_mean": 0.2, "secondary_mean": 0.1},
+        ]
+        backtest = RecommendationBacktestResult(
+            split_mode="leave_one_target_out",
+            split_folds=1,
+            summaries_by_bundle={
+                "A": RecommendationBacktestSummary(
+                    bundle_name="A",
+                    rows_evaluated=20,
+                    recommendation_improvement_rate=0.1,
+                    predicted_spec_pass_improvement_rate=0.4,
+                    no_change_fraction=0.3,
+                    move_mean_abs_total=None,
+                    move_median_abs_total=None,
+                    move_max_abs_total=None,
+                    warnings=[],
+                ),
+                "B": RecommendationBacktestSummary(
+                    bundle_name="B",
+                    rows_evaluated=20,
+                    recommendation_improvement_rate=0.2,
+                    predicted_spec_pass_improvement_rate=0.1,
+                    no_change_fraction=0.2,
+                    move_mean_abs_total=None,
+                    move_median_abs_total=None,
+                    move_max_abs_total=None,
+                    warnings=[],
+                ),
+            },
+            aborted=False,
+        )
+        scored = score_auto_decision_candidates(
+            ranked_bundles=ranked,
+            backtest_result=backtest,
+            objective="spec_pass_first",
+            decision_mode=DECISION_MODE_RECOMMENDATION_FIRST,
+            backtest_min_rows_for_use=5,
+        )
+        self.assertEqual(scored[0]["bundle_name"], "A")
+
+    def test_recommendation_first_falls_back_when_backtest_rows_too_low(self) -> None:
+        ranked = [
+            {"bundle_name": "A", "primary_mean": 0.1, "secondary_mean": 0.2},
+            {"bundle_name": "B", "primary_mean": 0.2, "secondary_mean": 0.1},
+        ]
+        backtest = RecommendationBacktestResult(
+            split_mode="leave_one_target_out",
+            split_folds=1,
+            summaries_by_bundle={
+                "A": RecommendationBacktestSummary(
+                    bundle_name="A",
+                    rows_evaluated=1,
+                    recommendation_improvement_rate=0.9,
+                    predicted_spec_pass_improvement_rate=0.9,
+                    no_change_fraction=0.1,
+                    move_mean_abs_total=None,
+                    move_median_abs_total=None,
+                    move_max_abs_total=None,
+                    warnings=[],
+                ),
+                "B": RecommendationBacktestSummary(
+                    bundle_name="B",
+                    rows_evaluated=1,
+                    recommendation_improvement_rate=0.8,
+                    predicted_spec_pass_improvement_rate=0.8,
+                    no_change_fraction=0.2,
+                    move_mean_abs_total=None,
+                    move_median_abs_total=None,
+                    move_max_abs_total=None,
+                    warnings=[],
+                ),
+            },
+            aborted=False,
+        )
+        scored = score_auto_decision_candidates(
+            ranked_bundles=ranked,
+            backtest_result=backtest,
+            objective="spec_pass_first",
+            decision_mode=DECISION_MODE_RECOMMENDATION_FIRST,
+            backtest_min_rows_for_use=5,
+        )
+        # Benchmark order preserved: A then B.
+        self.assertEqual([r["bundle_name"] for r in scored[:2]], ["A", "B"])
+
+    def test_render_report_shows_skipped_bundles(self) -> None:
+        regime = DataRegime(
+            total_rows=10,
+            target_count=2,
+            rows_per_target={"T1": 5, "T2": 5},
+            leave_one_target_out_feasible=True,
+            active_target_cutoff_feasible=False,
+            uncertainty_calibration_feasible=False,
+            recommendation_backtest_feasible=False,
+            regime_label="moderate_multi_target",
+            notes=[],
+        )
+        from core.auto_decision import AutoDecisionResult
+
+        out = AutoDecisionResult(
+            detected_regime=regime,
+            split_modes_used=["forward_chaining"],
+            bundles_evaluated=["baseline_linear", "baseline_tree"],
+            shortlisted_bundles=["baseline_linear"],
+            winner="baseline_linear",
+            runner_up=None,
+            confidence_level="low",
+            explanation_text="test",
+            excluded_reasons={
+                "split:leave_one_target_out": "not_feasible_in_regime",
+                "bundle:xgb_default": "not_in_allowlist",
+                "bundles:empty_after_filters": "fell_back_to_default_subset",
+            },
+            benchmark_suite=None,
+            benchmark_ranked=None,
+            backtest_result=None,
+        )
+        text = render_auto_decision_report_text(out)
+        self.assertIn("Skipped split modes:", text)
+        self.assertIn("Skipped bundles:", text)
+        self.assertIn("xgb_default", text)
+        self.assertIn("bundles:empty_after_filters", text)
+
+    def test_explanation_recommendation_first_backtest_used_and_fallback(self) -> None:
+        regime = DataRegime(
+            total_rows=100,
+            target_count=3,
+            rows_per_target={"T1": 40, "T2": 30, "T3": 30},
+            leave_one_target_out_feasible=True,
+            active_target_cutoff_feasible=False,
+            uncertainty_calibration_feasible=False,
+            recommendation_backtest_feasible=True,
+            regime_label="rich_multi_target",
+            notes=[],
+        )
+        ranked = [{"bundle_name": "A", "primary_mean": 0.1, "secondary_mean": 0.2}]
+        backtest = RecommendationBacktestResult(
+            split_mode="leave_one_target_out",
+            split_folds=1,
+            summaries_by_bundle={
+                "A": RecommendationBacktestSummary(
+                    bundle_name="A",
+                    rows_evaluated=20,
+                    recommendation_improvement_rate=0.1,
+                    predicted_spec_pass_improvement_rate=0.4,
+                    no_change_fraction=0.3,
+                    move_mean_abs_total=None,
+                    move_median_abs_total=None,
+                    move_max_abs_total=None,
+                    warnings=[],
+                )
+            },
+            aborted=False,
+        )
+
+        ex_used = _build_explanation(
+            regime=regime,
+            split_modes=["leave_one_target_out"],
+            objective="spec_pass_first",
+            uncertainty_mode="ignore",
+            winner="A",
+            runner_up=None,
+            scored=ranked,
+            backtest=backtest,
+            decision_mode=DECISION_MODE_RECOMMENDATION_FIRST,
+            used_backtest_as_primary=True,
+            backtest_min_rows_for_use=5,
+        )
+        self.assertIn("backtest was feasible", ex_used)
+
+        ex_fallback = _build_explanation(
+            regime=regime,
+            split_modes=["leave_one_target_out"],
+            objective="spec_pass_first",
+            uncertainty_mode="ignore",
+            winner="A",
+            runner_up=None,
+            scored=ranked,
+            backtest=None,
+            decision_mode=DECISION_MODE_RECOMMENDATION_FIRST,
+            used_backtest_as_primary=False,
+            backtest_min_rows_for_use=5,
+        )
+        self.assertIn("ranking fell back to benchmark results", ex_fallback)
 
 
 if __name__ == "__main__":

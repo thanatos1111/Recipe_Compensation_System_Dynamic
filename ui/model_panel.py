@@ -80,7 +80,7 @@ from core.ranking import get_supported_ranking_objectives, get_supported_uncerta
 from core.response_models import train_material_models
 from core.model_registry import get_model_availability_summary
 from core.schemas import MaterialDataset
-from core.auto_decision import AutoDecisionResult, run_auto_model_selection
+from core.auto_decision import AutoDecisionResult, render_auto_decision_report_text, run_auto_model_selection
 from core.auto_decision_goals import apply_goal_preset_to_settings, get_auto_decision_goal_presets
 from ui.bundle_editor_dialog import BundleEditorDialog
 
@@ -2591,6 +2591,7 @@ class ModelPanel(QWidget):
         # Bundle scope.
         ad = dict(auto_cfg.get("auto_decision") or {})
         # Suggested shortlist size from preset (if set), otherwise default 3.
+        preset_key = ""
         try:
             preset_key = str(self.auto_goal_preset_combo.currentData() or "")
             preset_settings = apply_goal_preset_to_settings(preset_key, current_settings={})
@@ -2598,6 +2599,10 @@ class ModelPanel(QWidget):
                 ad["shortlist_size"] = int(preset_settings["shortlist_size"])
         except Exception:
             pass
+
+        # Pass the explicit goal preset key into the backend so it can choose
+        # recommendation-first vs benchmark-first ranking behavior.
+        ad["goal_preset"] = preset_key
 
         scope = self.auto_bundle_scope_combo.currentText().strip().lower()
         if "selected" in scope:
@@ -2732,42 +2737,7 @@ class ModelPanel(QWidget):
             self.auto_result_text.setPlainText("Auto decision completed, but result was not recognized.")
             self.auto_status_label.setText("Completed.")
             return
-
-        lines: list[str] = []
-        lines.append("Auto decision engine report")
-        lines.append("")
-        lines.append(f"Detected regime: {out.detected_regime.regime_label}")
-        lines.append(f"- rows: {out.detected_regime.total_rows}")
-        lines.append(f"- targets: {out.detected_regime.target_count}")
-        lines.append(f"- split modes used: {out.split_modes_used}")
-
-        skipped = {k: v for k, v in (out.excluded_reasons or {}).items() if str(k).startswith("split:")}
-        if skipped:
-            lines.append("")
-            lines.append("Skipped split modes:")
-            for k, v in sorted(skipped.items()):
-                lines.append(f"- {k.replace('split:', '')}: {v}")
-
-        lines.append("")
-        lines.append(f"Bundles evaluated: {out.bundles_evaluated}")
-        lines.append(f"Shortlist: {out.shortlisted_bundles}")
-        lines.append("")
-        lines.append(f"Winner: {out.winner}")
-        lines.append(f"Runner-up: {out.runner_up}")
-        lines.append(f"Confidence level: {out.confidence_level}")
-        lines.append("")
-        lines.append("Explanation:")
-        lines.append(out.explanation_text.strip() if out.explanation_text else "-")
-
-        lines.append("")
-        lines.append("Suggested next action:")
-        if out.winner:
-            lines.append("- Adopt winner (button below) and then click Train to retrain.")
-            lines.append("- Or keep manual review: run a manual benchmark with your chosen split mode and bundles.")
-        else:
-            lines.append("- Keep manual review: run manual benchmark and inspect results.")
-
-        self.auto_result_text.setPlainText("\n".join(lines))
+        self.auto_result_text.setPlainText(render_auto_decision_report_text(out))
         self.auto_status_label.setText("Completed.")
 
     def _on_auto_decision_failed(self, message: str) -> None:

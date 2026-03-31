@@ -22,7 +22,11 @@ from core.benchmarking import BenchmarkSuiteResult, run_prediction_benchmark
 from core.bundles import get_effective_model_bundles
 from core.data_regime import DataRegime, inspect_data_regime
 from core.ranking import rank_benchmark_suite
-from core.recommendation_backtest import RecommendationBacktestResult, run_recommendation_backtest
+from core.recommendation_backtest import (
+    RecommendationBacktestResult,
+    RecommendationBacktestSummary,
+    run_recommendation_backtest,
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,36 @@ class AutoDecisionResult:
     benchmark_suite: Optional[BenchmarkSuiteResult] = None
     benchmark_ranked: Optional[list[dict[str, Any]]] = None
     backtest_result: Optional[RecommendationBacktestResult] = None
+
+
+DECISION_MODE_BENCHMARK_FIRST = "benchmark_first"
+DECISION_MODE_RECOMMENDATION_FIRST = "recommendation_first"
+
+
+def _goal_preset_to_decision_mode(goal_preset: str) -> str:
+    """
+    Map a goal preset key to a decision mode.
+
+    Important: do NOT infer recommendation-orientation from ranking objective;
+    the preset may still map to `spec_pass_first`.
+    """
+    k = str(goal_preset or "").strip()
+    if k == "recommendation_first":
+        return DECISION_MODE_RECOMMENDATION_FIRST
+    return DECISION_MODE_BENCHMARK_FIRST
+
+
+def _backtest_rows_usable_for_scoring(
+    s: Optional[RecommendationBacktestSummary],
+    *,
+    min_rows: int,
+) -> bool:
+    if s is None:
+        return False
+    try:
+        return int(getattr(s, "rows_evaluated", 0) or 0) >= int(min_rows)
+    except Exception:
+        return False
 
 
 def build_auto_evaluation_plan(df: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
@@ -114,6 +148,8 @@ def score_auto_decision_candidates(
     ranked_bundles: list[dict[str, Any]],
     backtest_result: Optional[RecommendationBacktestResult] = None,
     objective: str,
+    decision_mode: str = DECISION_MODE_BENCHMARK_FIRST,
+    backtest_min_rows_for_use: int = 5,
 ) -> list[dict[str, Any]]:
     """
     Combine benchmark ranking with optional backtest signals for auto-decision.
@@ -126,11 +162,16 @@ def score_auto_decision_candidates(
       inventing new score blends.)
     """
     rows = [dict(r) for r in (ranked_bundles or [])]
-    bt_map: dict[str, Any] = {}
+    bt_map: dict[str, RecommendationBacktestSummary] = {}
     if backtest_result is not None:
         for bn, s in (backtest_result.summaries_by_bundle or {}).items():
-            bt_map[str(bn)] = s
+            if isinstance(s, RecommendationBacktestSummary):
+                bt_map[str(bn)] = s
+            else:
+                # Be tolerant for dict-like summaries (e.g., test doubles).
+                bt_map[str(bn)] = s  # type: ignore[assignment]
 
+    # Attach backtest metrics to each ranked item (for explanation / sorting).
     for r in rows:
         bn = str(r.get("bundle_name", ""))
         s = bt_map.get(bn)
@@ -141,15 +182,54 @@ def score_auto_decision_candidates(
         r["backtest_predicted_spec_pass_improvement_rate"] = getattr(s, "predicted_spec_pass_improvement_rate", None)
         r["backtest_no_change_fraction"] = getattr(s, "no_change_fraction", None)
 
+    # Recommendation-first: override benchmark ordering with backtest metrics when usable.
+    if decision_mode == DECISION_MODE_RECOMMENDATION_FIRST:
+        if backtest_result is None or bool(getattr(backtest_result, "aborted", False)):
+            return rows
+        usable_backtest = any(
+            _backtest_rows_usable_for_scoring(s, min_rows=backtest_min_rows_for_use) for s in (bt_map or {}).values()
+        )
+        if not usable_backtest:
+            # Deterministic fallback: keep benchmark ranking order.
+            return rows
+
+        rank_index: dict[str, int] = {str(r.get("bundle_name", "")): i for i, r in enumerate(rows)}
+
+        def _bt_sort_key(item: dict[str, Any]) -> tuple[float, float, float, int]:
+            bn = str(item.get("bundle_name", ""))
+            idx = int(rank_index.get(bn, 10**9))
+
+            pred = item.get("backtest_predicted_spec_pass_improvement_rate")
+            rec = item.get("backtest_recommendation_improvement_rate")
+            nc = item.get("backtest_no_change_fraction")
+
+            try:
+                pred_v = float(pred) if pred is not None else float("-inf")
+            except Exception:
+                pred_v = float("-inf")
+            try:
+                rec_v = float(rec) if rec is not None else float("-inf")
+            except Exception:
+                rec_v = float("-inf")
+            try:
+                nc_v = float(nc) if nc is not None else float("inf")
+            except Exception:
+                nc_v = float("inf")
+
+            # higher is better for pred/rec, lower is better for nc.
+            return (-pred_v, -rec_v, nc_v, idx)
+
+        return sorted(rows, key=_bt_sort_key)
+
+    # Benchmark-first:
     if objective == "weighted_combined":
         # Avoid tie-breaking heuristics on top of the combined score.
         return rows
 
     def _tie_group_key(item: dict[str, Any]) -> tuple[Any, Any]:
-        # Use the objective's primary/secondary means when present.
         return (item.get("primary_mean"), item.get("secondary_mean"))
 
-    # Stable tie-breaking: within exact (primary, secondary) ties, prefer higher backtest improvement rate.
+    # Stable tie-breaking: within exact (primary, secondary) ties, prefer higher backtest recommendation improvement.
     grouped: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
     for r in rows:
         grouped.setdefault(_tie_group_key(r), []).append(r)
@@ -170,7 +250,6 @@ def score_auto_decision_candidates(
             except Exception:
                 return float("-inf")
 
-        # Keep original benchmark order if backtest doesn't distinguish.
         g_sorted = sorted(g, key=lambda d: _bt_key(d), reverse=True)
         out.extend(g_sorted)
 
@@ -366,10 +445,24 @@ def run_auto_model_selection(df: pd.DataFrame, config: dict[str, Any]) -> AutoDe
     else:
         excluded["stage:recommendation_backtest"] = "not_feasible_in_regime_or_no_shortlist"
 
+    goal_preset = str((config.get("auto_decision") or {}).get("goal_preset") or "").strip()
+    decision_mode = _goal_preset_to_decision_mode(goal_preset)
+    used_backtest_as_primary = False
+    if (
+        decision_mode == DECISION_MODE_RECOMMENDATION_FIRST
+        and backtest_result is not None
+        and not bool(getattr(backtest_result, "aborted", False))
+    ):
+        used_backtest_as_primary = any(
+            _backtest_rows_usable_for_scoring(s, min_rows=5) for s in (backtest_result.summaries_by_bundle or {}).values()
+        )
+
     scored = score_auto_decision_candidates(
         ranked_bundles=ranked,
         backtest_result=backtest_result,
         objective=objective,
+        decision_mode=decision_mode,
+        backtest_min_rows_for_use=5,
     )
     winner = str(scored[0]["bundle_name"]) if scored else None
     runner_up = str(scored[1]["bundle_name"]) if len(scored) > 1 else None
@@ -384,6 +477,9 @@ def run_auto_model_selection(df: pd.DataFrame, config: dict[str, Any]) -> AutoDe
         runner_up=runner_up,
         scored=scored,
         backtest=backtest_result,
+        decision_mode=decision_mode,
+        used_backtest_as_primary=used_backtest_as_primary,
+        backtest_min_rows_for_use=5,
     )
 
     return AutoDecisionResult(
@@ -442,6 +538,9 @@ def _build_explanation(
     runner_up: Optional[str],
     scored: list[dict[str, Any]],
     backtest: Optional[RecommendationBacktestResult],
+    decision_mode: str,
+    used_backtest_as_primary: bool,
+    backtest_min_rows_for_use: int,
 ) -> str:
     lines: list[str] = []
     lines.append("Auto-decision summary (material-local):")
@@ -469,8 +568,86 @@ def _build_explanation(
     else:
         lines.append(f"- recommendation_backtest: ran (aborted={bool(backtest.aborted)})")
 
+    if decision_mode == DECISION_MODE_RECOMMENDATION_FIRST:
+        if used_backtest_as_primary:
+            lines.append(
+                "- recommendation-first goal requested; backtest was feasible, "
+                "so winner ranking prioritized predicted spec-pass improvement rate"
+            )
+            if backtest is not None and winner:
+                s = (backtest.summaries_by_bundle or {}).get(winner)
+                if s is not None:
+                    lines.append(
+                        f"- winner_backtest: rows_evaluated={int(getattr(s, 'rows_evaluated', 0) or 0)}, "
+                        f"predicted_spec_pass_improvement_rate={getattr(s, 'predicted_spec_pass_improvement_rate', None)}, "
+                        f"recommendation_improvement_rate={getattr(s, 'recommendation_improvement_rate', None)}, "
+                        f"no_change_fraction={getattr(s, 'no_change_fraction', None)}"
+                    )
+        else:
+            lines.append(
+                "- recommendation-first goal requested, but backtest was unavailable/skipped/aborted "
+                f"or had too few usable rows (<{int(backtest_min_rows_for_use)}), so ranking fell back to benchmark results"
+            )
+
     # Keep explanation concise: add key notes.
     if regime.notes:
         lines.append(f"- regime_notes: {sorted(set(regime.notes))}")
+    return "\n".join(lines)
+
+
+def render_auto_decision_report_text(out: AutoDecisionResult) -> str:
+    """
+    Render an explainable auto-decision report as plain text.
+
+    This is UI-agnostic so other UI panels (or tests) can reuse it.
+    """
+    lines: list[str] = []
+    lines.append("Auto decision engine report")
+    lines.append("")
+    lines.append(f"Detected regime: {out.detected_regime.regime_label}")
+    lines.append(f"- rows: {out.detected_regime.total_rows}")
+    lines.append(f"- targets: {out.detected_regime.target_count}")
+    lines.append(f"- split modes used: {out.split_modes_used}")
+
+    skipped_split = {k: v for k, v in (out.excluded_reasons or {}).items() if str(k).startswith("split:")}
+    if skipped_split:
+        lines.append("")
+        lines.append("Skipped split modes:")
+        for k, v in sorted(skipped_split.items()):
+            lines.append(f"- {k.replace('split:', '')}: {v}")
+
+    skipped_bundles = {
+        k: v
+        for k, v in (out.excluded_reasons or {}).items()
+        if str(k).startswith("bundle:") or str(k).startswith("bundles:")
+    }
+    if skipped_bundles:
+        lines.append("")
+        lines.append("Skipped bundles:")
+        for k, v in sorted(skipped_bundles.items()):
+            if k.startswith("bundle:"):
+                lines.append(f"- {k.replace('bundle:', '')}: {v}")
+            elif k.startswith("bundles:"):
+                lines.append(f"- {k}: {v}")
+
+    lines.append("")
+    lines.append(f"Bundles evaluated: {out.bundles_evaluated}")
+    lines.append(f"Shortlist: {out.shortlisted_bundles}")
+    lines.append("")
+    lines.append(f"Winner: {out.winner}")
+    lines.append(f"Runner-up: {out.runner_up}")
+    lines.append(f"Confidence level: {out.confidence_level}")
+    lines.append("")
+    lines.append("Explanation:")
+    lines.append(out.explanation_text.strip() if out.explanation_text else "-")
+
+    lines.append("")
+    lines.append("Suggested next action:")
+    if out.winner:
+        lines.append("- Adopt winner (button below) and then click Train to retrain.")
+        lines.append("- Or keep manual review: run a manual benchmark with your chosen split mode and bundles.")
+    else:
+        lines.append("- Keep manual review: run manual benchmark and inspect results.")
+
     return "\n".join(lines)
 
