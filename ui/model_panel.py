@@ -63,6 +63,7 @@ from core.benchmarking import (
     flatten_benchmark_suite_folds,
     run_prediction_benchmark,
 )
+from core.bundles import describe_bundle, get_bundle_catalog
 from core.ranking import get_supported_ranking_objectives, get_supported_uncertainty_modes, rank_benchmark_suite
 from core.response_models import train_material_models
 from core.model_registry import get_model_availability_summary
@@ -74,6 +75,48 @@ except Exception:  # pragma: no cover
     FigureCanvas = None  # type: ignore[assignment]
 
 from matplotlib.figure import Figure
+
+
+class _NoPropagateWheelListWidget(QListWidget):
+    """
+    QListWidget that accepts wheel events to avoid scrolling parent containers.
+
+    In scrollable layouts (e.g. QScrollArea), wheel events can be re-routed to the
+    parent even when the cursor is over the list, making both the list and the
+    page scroll. Accepting the event here keeps scrolling localized.
+    """
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        # Manually scroll the list and accept the event so the parent scroll area
+        # doesn't also scroll.
+        sb = self.verticalScrollBar()
+        if sb is None:
+            try:
+                event.accept()
+            except Exception:
+                pass
+            return
+
+        delta_y = 0
+        try:
+            delta_y = int(event.angleDelta().y())
+        except Exception:
+            delta_y = 0
+
+        # Typical mouse wheels use 120 units per "step".
+        steps = 0
+        if delta_y:
+            steps = int(delta_y / 120) if abs(delta_y) >= 120 else (1 if delta_y > 0 else -1)
+
+        if steps:
+            single = max(int(sb.singleStep()), 1)
+            sb.setValue(sb.value() - steps * single)
+
+        try:
+            event.accept()
+        except Exception:
+            pass
+        # Do not call super().wheelEvent(event) (it can propagate at edges).
 
 
 class _EvalWorker(QObject):
@@ -503,12 +546,43 @@ class ModelPanel(QWidget):
         self.bench_split_mode_combo.currentTextChanged.connect(self._on_benchmark_split_mode_changed)
         benchmark_form.addRow("Split mode:", self.bench_split_mode_combo)
 
-        self.bench_bundle_list = QListWidget()
+        self.bench_bundle_list = _NoPropagateWheelListWidget()
         self.bench_bundle_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
         for bundle_name in MODEL_BUNDLE_PRESETS.keys():
             self.bench_bundle_list.addItem(QListWidgetItem(bundle_name))
-        self.bench_bundle_list.setMinimumHeight(90)
-        benchmark_form.addRow("Model bundles:", self.bench_bundle_list)
+        self.bench_bundle_list.setMinimumHeight(110)
+        self.bench_bundle_list.itemSelectionChanged.connect(self._refresh_benchmark_bundle_details)
+
+        # Prompt 10 + layout polish: keep bundles and bundle details aligned as left/right panels.
+        # Left: multi-select bundle list. Right: bundle details.
+        bundles_left_layout = QVBoxLayout()
+        bundles_left_layout.addWidget(QLabel("Model bundles (multi-select)"))
+        bundles_left_layout.addWidget(self.bench_bundle_list)
+        bundles_left_layout.setContentsMargins(0, 0, 0, 0)
+        bundles_left = QWidget()
+        bundles_left.setLayout(bundles_left_layout)
+
+        # Right panel: bundle details (read-only transparency for presets/custom bundles).
+        self.bench_bundle_details_group = QGroupBox("Bundle details")
+        bundle_details_layout = QVBoxLayout()
+        self.bench_bundle_details_text = QTextEdit()
+        self.bench_bundle_details_text.setReadOnly(True)
+        self.bench_bundle_details_text.setMinimumHeight(110)
+        self.bench_bundle_details_text.setPlaceholderText("Select a bundle to see what it contains.")
+        bundle_details_layout.addWidget(self.bench_bundle_details_text)
+        self.bench_bundle_details_group.setLayout(bundle_details_layout)
+
+        bundles_split = QSplitter()
+        bundles_split.setOrientation(Qt.Orientation.Horizontal)
+        bundles_split.addWidget(bundles_left)
+        bundles_split.addWidget(self.bench_bundle_details_group)
+        bundles_split.setStretchFactor(0, 0)
+        bundles_split.setStretchFactor(1, 1)
+        bundles_split.setCollapsible(0, False)
+        bundles_split.setCollapsible(1, False)
+        bundles_split.setSizes([220, 520])
+
+        benchmark_form.addRow("Bundles:", bundles_split)
 
         # Active-target parameters (only visible for active_target_cutoff split mode).
         self.bench_active_cutoff_box = QWidget()
@@ -1663,6 +1737,49 @@ class ModelPanel(QWidget):
             lines.append(f"{mn}: missing (install: {install})")
 
         self.bench_model_availability_label.setText("\n".join(lines))
+
+    def _refresh_benchmark_bundle_details(self) -> None:
+        if not hasattr(self, "bench_bundle_details_text") or not hasattr(self, "bench_bundle_list"):
+            return
+
+        selected = self._selected_targets_from_widget(self.bench_bundle_list)
+        if not selected:
+            self.bench_bundle_details_text.setPlainText("Select a bundle to see what it contains.")
+            return
+
+        # Requirement: keep multi-select; show first selected details (compact).
+        # (Optionally we could show a compact list for multi-select, but we keep
+        # this minimal for Prompt 10.)
+        bn = str(selected[0])
+        try:
+            desc = describe_bundle(bn, catalog=get_bundle_catalog())
+        except Exception as exc:
+            self.bench_bundle_details_text.setPlainText(f"Unable to describe bundle {bn!r}: {exc}")
+            return
+
+        by_target = desc.model_by_target()
+
+        def _line(target: str, label: str) -> str:
+            m = by_target.get(target)
+            if m is None:
+                return f"- {label}: (missing)"
+            if m.display_name and m.display_name != m.model_name:
+                return f"- {label}: {m.model_name} ({m.display_name})"
+            return f"- {label}: {m.model_name}"
+
+        lines = [
+            f"Bundle: {desc.bundle_name}",
+            f"Source: {desc.source}",
+            "",
+            _line("rs", "RS"),
+            _line("thickness", "Thickness"),
+            _line("rsu", "RSU"),
+        ]
+        if len(selected) > 1:
+            more = ", ".join(str(x) for x in selected[1:])
+            lines += ["", f"Also selected: {more}"]
+
+        self.bench_bundle_details_text.setPlainText("\n".join(lines))
 
     @staticmethod
     def _dedupe_preserve_order(items: list[str]) -> list[str]:
