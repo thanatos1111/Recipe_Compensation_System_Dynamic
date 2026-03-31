@@ -70,8 +70,10 @@ from core.benchmarking import (
 from core.bundles import (
     CUSTOM_MODEL_BUNDLES_KEY,
     describe_bundle,
+    get_applied_model_names,
     get_bundle_catalog,
     get_effective_model_bundles,
+    infer_applied_bundle_description,
     parse_custom_bundles_from_config,
     validate_custom_bundle,
 )
@@ -1136,6 +1138,12 @@ class ModelPanel(QWidget):
         self._training_target_ids = tuple(selected_targets) if selected_targets else tuple(self._ordered_target_ids)
         self._material_dataset.material_model_artifacts = artifacts
 
+        applied_models = get_applied_model_names(self._config)
+        applied_bundle = infer_applied_bundle_description(self._config)
+        applied_bundle_text = (
+            f"{applied_bundle.bundle_name} ({applied_bundle.source})" if applied_bundle is not None else "-"
+        )
+
         # Fit active-instance correction if possible.
         correction_text = ""
         if self._active_target_id and self._active_target_id in self._material_dataset.target_instances:
@@ -1155,6 +1163,8 @@ class ModelPanel(QWidget):
             "Training summary:\n"
             f"- material: {self._material_dataset.material_name}\n"
             f"- rows: {artifacts.train_summary.get('row_count')}\n"
+            f"- applied_model_bundle: {applied_bundle_text}\n"
+            f"- applied_models: rs={applied_models.get('rs')}, thickness={applied_models.get('thickness')}, rsu={applied_models.get('rsu')}\n"
             f"- selected_training_targets: {list(self._training_target_ids)}\n"
             f"- target_instances: {artifacts.train_summary.get('target_instance_count')}\n"
             "\nMetrics (leakage-free benchmark):\n"

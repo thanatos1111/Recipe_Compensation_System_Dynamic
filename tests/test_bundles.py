@@ -5,8 +5,10 @@ import pytest
 from core.bundles import (
     CUSTOM_MODEL_BUNDLES_KEY,
     describe_bundle,
+    get_applied_model_names,
     get_bundle_catalog,
     get_effective_model_bundles,
+    infer_applied_bundle_description,
     parse_custom_bundles_from_config,
     validate_custom_bundle,
 )
@@ -72,4 +74,16 @@ def test_get_effective_model_bundles_includes_custom() -> None:
     assert "balanced_default" in bundles
     assert "my_custom" in bundles
     assert bundles["my_custom"]["rs"] == "gbr"
+
+
+def test_get_applied_model_names_defaults_to_gbr() -> None:
+    assert get_applied_model_names({}) == {"rs": "gbr", "thickness": "gbr", "rsu": "gbr"}
+
+
+def test_infer_applied_bundle_description_matches_preset() -> None:
+    cfg = {"model_settings": {"rs_model": "gbr", "thickness_model": "gbr", "rsu_model": "gbr"}}
+    desc = infer_applied_bundle_description(cfg)
+    assert desc is not None
+    assert desc.bundle_name == "balanced_default"
+    assert desc.source == "preset"
 

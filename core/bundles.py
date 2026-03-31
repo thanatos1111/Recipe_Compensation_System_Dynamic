@@ -212,3 +212,44 @@ def describe_bundle(
     models = (_resolve("rs"), _resolve("thickness"), _resolve("rsu"))
     return BundleDescription(bundle_name=bn, source=source, models=models)
 
+
+def get_applied_model_names(config: Optional[Mapping[str, Any]]) -> dict[str, str]:
+    """
+    Return the currently applied per-target model registry names from config.
+
+    This mirrors the training/benchmark code paths where ``config["model_settings"]``
+    selects the model used for each target regression output.
+    """
+    cfg = dict(config or {})
+    ms = cfg.get("model_settings", {}) or {}
+    if not isinstance(ms, Mapping):
+        ms = {}
+    rs = str(ms.get("rs_model", "gbr") or "gbr")
+    thickness = str(ms.get("thickness_model", rs) or rs)
+    rsu = str(ms.get("rsu_model", rs) or rs)
+    return {"rs": rs, "thickness": thickness, "rsu": rsu}
+
+
+def infer_applied_bundle_description(config: Optional[Mapping[str, Any]]) -> Optional[BundleDescription]:
+    """
+    Infer a bundle description matching the currently applied model triple.
+
+    Returns ``None`` when the applied models do not exactly match any known bundle
+    (preset or custom) in the effective config.
+    """
+    if config is None:
+        return None
+    applied = get_applied_model_names(config)
+    catalog = get_bundle_catalog(config=config)
+    for name, entry in catalog.items():
+        try:
+            models = normalize_bundle_models(entry.get("models") or {})
+        except Exception:
+            continue
+        if all(models.get(k) == applied.get(k) for k in _BUNDLE_TARGET_KEYS):
+            try:
+                return describe_bundle(name, catalog=catalog)
+            except Exception:
+                return None
+    return None
+
