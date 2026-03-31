@@ -651,6 +651,17 @@ class ModelPanel(QWidget):
         self.bench_backtest_group.setVisible(True)
         benchmark_layout.addWidget(self.bench_backtest_group)
 
+        # Backtest warnings summary (compact, deduped).
+        self.bench_backtest_warning_box = QGroupBox("Backtest warnings")
+        backtest_warn_layout = QVBoxLayout()
+        self.bench_backtest_warnings_text = QTextEdit()
+        self.bench_backtest_warnings_text.setReadOnly(True)
+        self.bench_backtest_warnings_text.setMaximumHeight(90)
+        backtest_warn_layout.addWidget(self.bench_backtest_warnings_text)
+        self.bench_backtest_warning_box.setLayout(backtest_warn_layout)
+        self.bench_backtest_warning_box.setVisible(False)
+        benchmark_layout.addWidget(self.bench_backtest_warning_box)
+
         bench_bottom_split = QSplitter()
         bench_bottom_split.setOrientation(Qt.Orientation.Horizontal)
 
@@ -673,6 +684,17 @@ class ModelPanel(QWidget):
         bench_bottom_split.setSizes([420, 420])
 
         benchmark_layout.addWidget(bench_bottom_split)
+
+        # Benchmark warnings summary (compact, deduped).
+        self.bench_warning_box = QGroupBox("Benchmark warnings")
+        warn_layout = QVBoxLayout()
+        self.bench_warnings_text = QTextEdit()
+        self.bench_warnings_text.setReadOnly(True)
+        self.bench_warnings_text.setMaximumHeight(90)
+        warn_layout.addWidget(self.bench_warnings_text)
+        self.bench_warning_box.setLayout(warn_layout)
+        self.bench_warning_box.setVisible(False)
+        benchmark_layout.addWidget(self.bench_warning_box)
         benchmark_page.setLayout(benchmark_page_layout)
         self.section_tabs.addTab(benchmark_page, "5) Benchmark")
         self._on_benchmark_split_mode_changed(self.bench_split_mode_combo.currentText())
@@ -1532,13 +1554,85 @@ class ModelPanel(QWidget):
                 continue
 
             missing_error = meta.get("missing_error") or ""
-            install = missing_error.replace("pip install ", "pip install ")
-            if not install.startswith("pip install"):
-                # Fallback (should not happen, but keep message readable).
-                install = f"pip install {meta.get('external_dependency')}"
+            install = missing_error.strip() if isinstance(missing_error, str) else ""
+            if not install:
+                dep = meta.get("external_dependency") or mn
+                install = f"pip install {dep}"
             lines.append(f"{mn}: missing (install: {install})")
 
         self.bench_model_availability_label.setText("\n".join(lines))
+
+    @staticmethod
+    def _dedupe_preserve_order(items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for x in items:
+            if x in seen:
+                continue
+            seen.add(x)
+            out.append(x)
+        return out
+
+    def _render_benchmark_warning_summary(self, suite: Any) -> None:
+        if not hasattr(self, "bench_warning_box") or not hasattr(self, "bench_warnings_text"):
+            return
+        if suite is None or not getattr(suite, "runs", None):
+            self.bench_warning_box.setVisible(False)
+            self.bench_warnings_text.setPlainText("")
+            return
+
+        lines: list[str] = []
+        for run in suite.runs:
+            try:
+                warns = list(run.summary.aggregate_warnings or [])
+            except Exception:
+                warns = []
+            for w in warns:
+                if not w:
+                    continue
+                lines.append(f"{run.bundle_name}: {str(w)}")
+
+        lines = self._dedupe_preserve_order([str(x) for x in lines if str(x).strip()])
+        if not lines:
+            self.bench_warning_box.setVisible(False)
+            self.bench_warnings_text.setPlainText("")
+            return
+
+        self.bench_warning_box.setVisible(True)
+        self.bench_warnings_text.setPlainText("\n".join(lines))
+
+    def _render_backtest_warning_summary(self, backtest_result: Any) -> None:
+        if not hasattr(self, "bench_backtest_warning_box") or not hasattr(self, "bench_backtest_warnings_text"):
+            return
+        if backtest_result is None:
+            self.bench_backtest_warning_box.setVisible(False)
+            self.bench_backtest_warnings_text.setPlainText("")
+            return
+
+        try:
+            rows = list(backtest_result.to_table_rows() or [])
+        except Exception:
+            rows = []
+
+        lines: list[str] = []
+        for r in rows:
+            bn = str(r.get("bundle_name") or "")
+            warn_str = str(r.get("warnings") or "").strip()
+            rows_eval = int(r.get("rows_evaluated") or 0)
+            if not warn_str:
+                continue
+            for w in [x.strip() for x in warn_str.split(";") if x.strip()]:
+                suffix = " (no rows evaluated)" if rows_eval == 0 else ""
+                lines.append(f"{bn}: {w}{suffix}")
+
+        lines = self._dedupe_preserve_order([str(x) for x in lines if str(x).strip()])
+        if not lines:
+            self.bench_backtest_warning_box.setVisible(False)
+            self.bench_backtest_warnings_text.setPlainText("")
+            return
+
+        self.bench_backtest_warning_box.setVisible(True)
+        self.bench_backtest_warnings_text.setPlainText("\n".join(lines))
 
     def _on_bench_backtest_toggled(self, checked: bool) -> None:
         self._last_recommendation_backtest_result = None
@@ -1610,6 +1704,7 @@ class ModelPanel(QWidget):
 
         self.bench_backtest_table.resizeRowsToContents()
         self.bench_backtest_table.resizeColumnsToContents()
+        self._render_backtest_warning_summary(backtest_result)
 
         # Simple plots: compare rates side-by-side.
         if self.bench_backtest_ax is None:
@@ -1735,6 +1830,7 @@ class ModelPanel(QWidget):
         self._render_benchmark_fold_table(suite)
         self._render_benchmark_chart(suite)
         self._render_benchmark_best_explanation(suite, ranked)
+        self._render_benchmark_warning_summary(suite)
 
         # Optional recommendation backtest.
         if self.bench_backtest_enabled_checkbox.isChecked():
