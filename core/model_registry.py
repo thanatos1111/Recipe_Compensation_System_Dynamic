@@ -18,6 +18,9 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 
+import numpy as np
+import pandas as pd
+
 
 _SUPPORTED_MODEL_NAMES: tuple[str, ...] = (
     "linear",
@@ -370,20 +373,42 @@ def build_preprocessed_regression_pipeline(
     )
 
     estimator = build_regression_estimator(model_name, random_state=random_state, config=config)
+
     steps: list[tuple[str, Any]] = [("preprocess", preprocessor)]
 
-    if mn == "catboost":
-        # CatBoost is more sensitive to sparse inputs; densify only for catboost.
-        steps.append(
-            (
-                "to_dense",
-                FunctionTransformer(
-                    lambda X: X.toarray() if hasattr(X, "toarray") else X,
-                    validate=False,
-                ),
-            )
-        )
+    def _make_external_matrix_normalizer() -> FunctionTransformer:
+        # Unify the transformed container passed into external estimators.
+        #
+        # Some sklearn wrappers (notably LightGBM) perform strict feature-name
+        # validation and can warn when fit/predict receive different
+        # "feature-name aware" containers. To keep things stable, we convert
+        # to a dense matrix and return a DataFrame with deterministic column
+        # names.
+        def _normalize(X: Any) -> Any:
+            if hasattr(X, "toarray"):
+                dense = np.asarray(X.toarray(), dtype=float)
+            else:
+                dense = np.asarray(X, dtype=float)
+
+            # Stable "Column_0..N" names so predict() has valid names too.
+            cols = [f"Column_{i}" for i in range(dense.shape[1])]
+            return pd.DataFrame(dense, columns=cols)
+
+        return FunctionTransformer(_normalize, validate=False)
+
+    if mn in {"xgb", "lgbm", "catboost"}:
+        steps.append(("external_matrix_normalizer", _make_external_matrix_normalizer()))
 
     steps.append(("model", estimator))
-    return Pipeline(steps=steps)
+    pipe = Pipeline(steps=steps)
+
+    # Some environments configure sklearn to emit pandas outputs from transformers.
+    # For external boosted models we want a consistent ndarray container so
+    # feature-name checks don't warn on predict().
+    try:  # pragma: no cover - depends on sklearn version/config.
+        pipe.set_output(transform="default")
+    except Exception:
+        pass
+
+    return pipe
 

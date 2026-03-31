@@ -50,6 +50,7 @@ from core.benchmarking import (
     run_prediction_benchmark,
 )
 from core.response_models import train_material_models
+from core.model_registry import get_model_availability_summary
 from core.schemas import MaterialDataset
 
 try:
@@ -566,6 +567,16 @@ class ModelPanel(QWidget):
 
         benchmark_controls_box.setLayout(benchmark_form)
         benchmark_layout.addWidget(benchmark_controls_box)
+
+        # Model availability summary (external boosted models are optional).
+        benchmark_availability_group = QGroupBox("Model availability")
+        availability_layout = QVBoxLayout()
+        self.bench_model_availability_label = QLabel("")
+        self.bench_model_availability_label.setWordWrap(True)
+        availability_layout.addWidget(self.bench_model_availability_label)
+        benchmark_availability_group.setLayout(availability_layout)
+        benchmark_layout.addWidget(benchmark_availability_group)
+        self._refresh_benchmark_model_availability()
 
         self.bench_summary_table = QTableWidget()
         # Ensure full header text is visible.
@@ -1505,6 +1516,30 @@ class ModelPanel(QWidget):
         is_active_cutoff = str(split_mode).strip() == "active_target_cutoff"
         self.bench_active_cutoff_box.setVisible(is_active_cutoff)
 
+    def _refresh_benchmark_model_availability(self) -> None:
+        if not hasattr(self, "bench_model_availability_label"):
+            return
+
+        summary = get_model_availability_summary()
+
+        # sklearn models are always available in this app.
+        lines: list[str] = ["sklearn models: available"]
+        for mn in ("xgb", "lgbm", "catboost"):
+            meta = summary.get(mn) or {}
+            available = bool(meta.get("available"))
+            if available:
+                lines.append(f"{mn}: available")
+                continue
+
+            missing_error = meta.get("missing_error") or ""
+            install = missing_error.replace("pip install ", "pip install ")
+            if not install.startswith("pip install"):
+                # Fallback (should not happen, but keep message readable).
+                install = f"pip install {meta.get('external_dependency')}"
+            lines.append(f"{mn}: missing (install: {install})")
+
+        self.bench_model_availability_label.setText("\n".join(lines))
+
     def _on_bench_backtest_toggled(self, checked: bool) -> None:
         self._last_recommendation_backtest_result = None
         self.bench_backtest_progress.setValue(0)
@@ -1551,6 +1586,7 @@ class ModelPanel(QWidget):
             "move_mean_abs_total",
             "move_median_abs_total",
             "move_max_abs_total",
+            "warnings",
         ]
 
         self.bench_backtest_table.clear()

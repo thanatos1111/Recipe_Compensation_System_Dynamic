@@ -13,7 +13,7 @@ It produces practical usefulness metrics intended for comparing future models.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -24,6 +24,7 @@ from core.candidate_generator import generate_candidates
 from core.feature_engineering import build_feature_matrix
 from core.labeling import apply_spec_labels
 from core.optimizer import rank_candidates, select_best_candidate
+from core.model_registry import ExternalModelDependencyMissingError
 from core.response_models import fit_model_for_target
 from core.schemas import SpecConfig
 from core.validation_schemes import split_strategy_to_iter
@@ -39,6 +40,7 @@ class RecommendationBacktestSummary:
     move_mean_abs_total: Optional[float]
     move_median_abs_total: Optional[float]
     move_max_abs_total: Optional[float]
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ class RecommendationBacktestResult:
                     "move_mean_abs_total": s.move_mean_abs_total,
                     "move_median_abs_total": s.move_median_abs_total,
                     "move_max_abs_total": s.move_max_abs_total,
+                    "warnings": ";".join(s.warnings or []),
                 }
             )
         return rows
@@ -202,11 +205,27 @@ def backtest_single_fold(
     Returns dict with counts + move vectors so callers can aggregate across folds.
     """
     if train_df is None or train_df.empty or test_df is None or test_df.empty:
-        return {"aborted": False, "rows_evaluated": 0, "improvement_rows": 0, "predicted_spec_improved_rows": 0, "no_change_rows": 0, "move_abs_totals": []}
+        return {
+            "aborted": False,
+            "rows_evaluated": 0,
+            "improvement_rows": 0,
+            "predicted_spec_improved_rows": 0,
+            "no_change_rows": 0,
+            "move_abs_totals": [],
+            "warnings": [],
+        }
 
     parameter_config = config.get("parameter_constraints") or {}
     if not parameter_config:
-        return {"aborted": False, "rows_evaluated": 0, "improvement_rows": 0, "predicted_spec_improved_rows": 0, "no_change_rows": 0, "move_abs_totals": []}
+        return {
+            "aborted": False,
+            "rows_evaluated": 0,
+            "improvement_rows": 0,
+            "predicted_spec_improved_rows": 0,
+            "no_change_rows": 0,
+            "move_abs_totals": [],
+            "warnings": [],
+        }
 
     spec_config = config.get("spec_config")
     if spec_config is None or not isinstance(spec_config, SpecConfig):
@@ -231,9 +250,25 @@ def backtest_single_fold(
     fit_cfg = dict(config)
     fit_cfg["model_settings"] = model_cfg
 
-    rs_model = fit_model_for_target(train_df, "rs", fit_cfg, feature_matrix=X_train)
-    th_model = fit_model_for_target(train_df, "thickness", fit_cfg, feature_matrix=X_train)
-    rsu_model = fit_model_for_target(train_df, "rsu", fit_cfg, feature_matrix=X_train)
+    fold_warnings: list[str] = []
+
+    try:
+        rs_model = fit_model_for_target(train_df, "rs", fit_cfg, feature_matrix=X_train)
+    except ExternalModelDependencyMissingError as exc:
+        fold_warnings.append(exc.user_message)
+        rs_model = None
+
+    try:
+        th_model = fit_model_for_target(train_df, "thickness", fit_cfg, feature_matrix=X_train)
+    except ExternalModelDependencyMissingError as exc:
+        fold_warnings.append(exc.user_message)
+        th_model = None
+
+    try:
+        rsu_model = fit_model_for_target(train_df, "rsu", fit_cfg, feature_matrix=X_train)
+    except ExternalModelDependencyMissingError as exc:
+        fold_warnings.append(exc.user_message)
+        rsu_model = None
 
     model_bundle = {
         "rs_model": rs_model,
@@ -278,6 +313,7 @@ def backtest_single_fold(
             "predicted_spec_improved_rows": 0,
             "no_change_rows": 0,
             "move_abs_totals": [],
+            "warnings": fold_warnings,
         }
 
     for _, row in test_df.iterrows():
@@ -289,6 +325,7 @@ def backtest_single_fold(
                 "predicted_spec_improved_rows": predicted_spec_improvements,
                 "no_change_rows": no_change_rows,
                 "move_abs_totals": move_abs_totals,
+                "warnings": fold_warnings,
             }
 
         reference_recipe = _reference_recipe_from_row(row)
@@ -391,6 +428,7 @@ def backtest_single_fold(
             "predicted_spec_improved_rows": 0,
             "no_change_rows": 0,
             "move_abs_totals": [],
+            "warnings": fold_warnings,
         }
 
     return {
@@ -400,6 +438,7 @@ def backtest_single_fold(
         "predicted_spec_improved_rows": predicted_spec_improvements,
         "no_change_rows": no_change_rows,
         "move_abs_totals": move_abs_totals,
+        "warnings": fold_warnings,
     }
 
 
@@ -472,7 +511,14 @@ def run_recommendation_backtest(
     # Aggregate per bundle.
     acc: dict[str, dict[str, Any]] = {}
     for bn in bundle_names:
-        acc[bn] = {"rows_evaluated": 0, "improvement_rows": 0, "predicted_spec_improved_rows": 0, "no_change_rows": 0, "move_abs_totals": []}
+        acc[bn] = {
+            "rows_evaluated": 0,
+            "improvement_rows": 0,
+            "predicted_spec_improved_rows": 0,
+            "no_change_rows": 0,
+            "move_abs_totals": [],
+            "warnings": [],
+        }
 
     # Compute total progress units: capped test rows across all folds times number of bundles.
     fold_test_row_caps: list[int] = []
@@ -522,6 +568,7 @@ def run_recommendation_backtest(
             acc_bn["predicted_spec_improved_rows"] += int(fold_metrics["predicted_spec_improved_rows"])
             acc_bn["no_change_rows"] += int(fold_metrics["no_change_rows"])
             acc_bn["move_abs_totals"].extend([float(v) for v in fold_metrics.get("move_abs_totals") or []])
+            acc_bn["warnings"].extend([str(w) for w in fold_metrics.get("warnings") or []])
 
             if bool(fold_metrics.get("aborted")):
                 aborted_any = True
@@ -544,6 +591,7 @@ def run_recommendation_backtest(
                 move_mean_abs_total=None,
                 move_median_abs_total=None,
                 move_max_abs_total=None,
+                warnings=acc[bn].get("warnings") or [],
             )
             continue
 
@@ -565,6 +613,7 @@ def run_recommendation_backtest(
             move_mean_abs_total=move_mean,
             move_median_abs_total=move_median,
             move_max_abs_total=move_max,
+            warnings=acc[bn].get("warnings") or [],
         )
 
     return RecommendationBacktestResult(
