@@ -9,7 +9,6 @@ Milestone 3 adds:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Optional
 
@@ -29,8 +28,7 @@ from ui.trend_panel import TrendPanel
 from ui.model_panel import ModelPanel
 from ui.recommendation_panel import RecommendationPanel
 from ui.update_panel import UpdatePanel
-from ui.settings_dialog import SettingsDialog
-from ui.settings_tabs_dialog import SettingsTabsDialog
+from ui.app_settings_dialog import AppSettingsDialog
 
 
 class MainWindow(QMainWindow):
@@ -116,43 +114,19 @@ class MainWindow(QMainWindow):
         settings_menu = QMenu("Settings", self)
         menubar.addMenu(settings_menu)
 
-        action_constraints = settings_menu.addAction("Edit parameter constraints (JSON)...")
-        action_constraints.triggered.connect(self._edit_parameter_constraints)
+        action_settings = settings_menu.addAction("Settings…")
+        action_settings.triggered.connect(self._open_app_settings)
 
-        action_min_steps = settings_menu.addAction("Minimum parameter steps (JSON)...")
-        action_min_steps.triggered.connect(self._edit_minimum_steps)
+    def _open_app_settings(self) -> None:
+        """Tabbed editor for parameter registry, aliases, minimum steps, and related options."""
 
-        settings_tabs = settings_menu.addAction("Settings (Constraints + Minimum Steps)...")
-        settings_tabs.triggered.connect(self._edit_settings_tabs)
-
-    def _edit_parameter_constraints(self) -> None:
-        current = self.config.get("parameter_constraints", {})
-
-        def on_save(new_constraints: dict[str, Any]) -> None:
-            # Persist to user_config and update effective config in-memory.
-            self.user_config["parameter_constraints"] = new_constraints
+        def on_apply(payload: dict[str, Any]) -> None:
+            self.user_config["minimum_steps"] = payload.get("minimum_steps", {})
+            self.user_config["model_validation_defaults"] = payload.get("model_validation_defaults", {})
             save_user_config(self.project_root, self.user_config)
             self.config = load_effective_config(self.project_root)
             apply_parameter_registry_to_config(self.project_root, self.config)
 
-        dlg = SettingsDialog(
-            title="Parameter constraints",
-            initial_value=current,
-            on_save=on_save,
-            parent=self,
-        )
-        dlg.exec()
-
-    def _edit_minimum_steps(self) -> None:
-        current = self.config.get("minimum_steps", {})
-
-        def on_save(new_min_steps: dict[str, Any]) -> None:
-            self.user_config["minimum_steps"] = new_min_steps
-            save_user_config(self.project_root, self.user_config)
-            self.config = load_effective_config(self.project_root)
-            apply_parameter_registry_to_config(self.project_root, self.config)
-
-            # Refresh panels with the new config.
             if self._current_material and self._current_target_id:
                 dataset = self.material_manager.get_material(self._current_material)
                 self.trend_panel.set_context(
@@ -166,40 +140,10 @@ class MainWindow(QMainWindow):
                     config=self.config,
                 )
 
-        dlg = SettingsDialog(
-            title="Minimum parameter steps",
-            initial_value=current,
-            on_save=on_save,
-            parent=self,
-        )
-        dlg.exec()
-
-    def _edit_settings_tabs(self) -> None:
-        initial_constraints = self.config.get("parameter_constraints", {}) or {}
-        initial_min_steps = self.config.get("minimum_steps", {}) or {}
-
-        def on_save(new_constraints: dict[str, Any], new_min_steps: dict[str, Any]) -> None:
-            self.user_config["parameter_constraints"] = new_constraints
-            self.user_config["minimum_steps"] = new_min_steps
-            save_user_config(self.project_root, self.user_config)
-            self.config = load_effective_config(self.project_root)
-            apply_parameter_registry_to_config(self.project_root, self.config)
-
-            # Refresh panels to reflect updated step constraints.
-            if self._current_material and self._current_target_id:
-                dataset = self.material_manager.get_material(self._current_material)
-                self.trend_panel.set_context(dataset, active_target_id=self._current_target_id, config=self.config)
-                self.recommendation_panel.set_context(
-                    dataset,
-                    active_target_id=self._current_target_id,
-                    config=self.config,
-                )
-
-        dlg = SettingsTabsDialog(
-            title="Settings (Constraints + Minimum Steps)",
-            initial_parameter_constraints=initial_constraints,
-            initial_minimum_steps=initial_min_steps,
-            on_save=on_save,
+        dlg = AppSettingsDialog(
+            project_root=self.project_root,
+            initial_user_config=self.user_config,
+            on_apply=on_apply,
             parent=self,
         )
         dlg.exec()

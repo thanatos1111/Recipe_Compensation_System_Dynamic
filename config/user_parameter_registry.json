@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "parameters": [
+    {
+      "canonical_name": "incident_angle",
+      "display_name": "Incident Angle",
+      "data_type": "continuous",
+      "min_value": 0.0,
+      "max_value": 0.0,
+      "step": 0.0,
+      "enabled": true,
+      "notes": "",
+      "unit": null,
+      "aliases": [
+        {
+          "header": "Incident Angle",
+          "source": "excel"
+        }
+      ],
+      "allowed_values": null,
+      "is_coupled": false,
+      "coupling_group": null,
+      "dependent_constraints": []
+    },
+    {
+      "canonical_name": "linear_offset",
+      "display_name": "Linear Offset",
+      "data_type": "continuous",
+      "min_value": 0.0,
+      "max_value": 0.0,
+      "step": 0.0,
+      "enabled": true,
+      "notes": "",
+      "unit": null,
+      "aliases": [
+        {
+          "header": "Linear Offset",
+          "source": "excel"
+        }
+      ],
+      "allowed_values": null,
+      "is_coupled": false,
+      "coupling_group": null,
+      "dependent_constraints": []
+    },
+    {
+      "canonical_name": "rotations",
+      "display_name": "Rotations",
+      "data_type": "discrete_step",
+      "min_value": 0.0,
+      "max_value": 0.0,
+      "step": 1.0,
+      "enabled": true,
+      "notes": "",
+      "unit": null,
+      "aliases": [
+        {
+          "header": "Rotations",
+          "source": "excel"
+        }
+      ],
+      "allowed_values": null,
+      "is_coupled": false,
+      "coupling_group": null,
+      "dependent_constraints": []
+    },
+    {
+      "canonical_name": "rpm",
+      "display_name": "RPM",
+      "data_type": "continuous",
+      "min_value": 0.0,
+      "max_value": 0.0,
+      "step": 0.0,
+      "enabled": false,
+      "notes": "",
+      "unit": null,
+      "aliases": [
+        {
+          "header": "RPM",
+          "source": "excel"
+        }
+      ],
+      "allowed_values": null,
+      "is_coupled": false,
+      "coupling_group": null,
+      "dependent_constraints": []
+    },
+    {
+      "canonical_name": "power",
+      "display_name": "Power",
+      "data_type": "continuous",
+      "min_value": 0.0,
+      "max_value": 0.0,
+      "step": 0.0,
+      "enabled": false,
+      "notes": "",
+      "unit": null,
+      "aliases": [
+        {
+          "header": "Power",
+          "source": "excel"
+        }
+      ],
+      "allowed_values": null,
+      "is_coupled": false,
+      "coupling_group": null,
+      "dependent_constraints": []
+    },
+    {
+      "canonical_name": "o2_flow",
+      "display_name": "O2",
+      "data_type": "continuous",
+      "min_value": 0.0,
+      "max_value": 0.0,
+      "step": 0.0,
+      "enabled": true,
+      "notes": "",
+      "unit": null,
+      "aliases": [
+        {
+          "header": "O2",
+          "source": "excel"
+        }
+      ],
+      "allowed_values": null,
+      "is_coupled": true,
+      "coupling_group": "total_flow",
+      "dependent_constraints": []
+    },
+    {
+      "canonical_name": "ar_flow",
+      "display_name": "Ar",
+      "data_type": "continuous",
+      "min_value": 0.0,
+      "max_value": 0.0,
+      "step": 0.0,
+      "enabled": true,
+      "notes": "",
+      "unit": null,
+      "aliases": [
+        {
+          "header": "Ar",
+          "source": "excel"
+        }
+      ],
+      "allowed_values": null,
+      "is_coupled": true,
+      "coupling_group": "total_flow",
+      "dependent_constraints": []
+    }
+  ]
+}
