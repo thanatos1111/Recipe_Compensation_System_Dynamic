@@ -15,6 +15,7 @@ CORE_MODULES = [
     "core.instance_correction",
     "core.candidate_generator",
     "core.constraints",
+    "core.parameter_registry",
     "core.optimizer",
     "core.safe_band",
     "core.recommendation_engine",

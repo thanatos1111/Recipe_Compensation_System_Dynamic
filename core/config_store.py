@@ -44,6 +44,14 @@ def get_user_config_path(project_root: Path) -> Path:
     return project_root / "config" / "user_config.json"
 
 
+def get_default_parameter_registry_path(project_root: Path) -> Path:
+    return project_root / "config" / "default_parameter_registry.json"
+
+
+def get_user_parameter_registry_path(project_root: Path) -> Path:
+    return project_root / "config" / "user_parameter_registry.json"
+
+
 def load_effective_config(project_root: Path) -> dict[str, Any]:
     base = load_json(get_default_config_path(project_root))
     user = load_json(get_user_config_path(project_root))

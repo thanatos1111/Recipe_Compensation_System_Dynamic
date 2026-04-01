@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QLabel, QMainWindow, QMenu, QMenuBar, QTabWidget, 
 
 from core.config_store import load_effective_config, load_user_config, save_user_config
 from core.material_manager import MaterialManager
+from core.parameter_registry import apply_parameter_registry_to_config
 from core.labeling import compute_derived_features
 from core.schemas import SpecConfig
 
@@ -47,6 +48,7 @@ class MainWindow(QMainWindow):
         self.user_config = load_user_config(self.project_root)
 
         self.config = load_effective_config(self.project_root)
+        apply_parameter_registry_to_config(self.project_root, self.config)
         self.column_map = self.config.get("column_mapping", {})
         self._spec_config = self._spec_config_from_config(self.config.get("spec_settings", {}))
 
@@ -131,6 +133,7 @@ class MainWindow(QMainWindow):
             self.user_config["parameter_constraints"] = new_constraints
             save_user_config(self.project_root, self.user_config)
             self.config = load_effective_config(self.project_root)
+            apply_parameter_registry_to_config(self.project_root, self.config)
 
         dlg = SettingsDialog(
             title="Parameter constraints",
@@ -147,6 +150,7 @@ class MainWindow(QMainWindow):
             self.user_config["minimum_steps"] = new_min_steps
             save_user_config(self.project_root, self.user_config)
             self.config = load_effective_config(self.project_root)
+            apply_parameter_registry_to_config(self.project_root, self.config)
 
             # Refresh panels with the new config.
             if self._current_material and self._current_target_id:
@@ -179,6 +183,7 @@ class MainWindow(QMainWindow):
             self.user_config["minimum_steps"] = new_min_steps
             save_user_config(self.project_root, self.user_config)
             self.config = load_effective_config(self.project_root)
+            apply_parameter_registry_to_config(self.project_root, self.config)
 
             # Refresh panels to reflect updated step constraints.
             if self._current_material and self._current_target_id:
@@ -365,6 +370,7 @@ class MainWindow(QMainWindow):
         # Reload effective config (so newly-saved overrides are reflected).
         self.user_config = load_user_config(self.project_root)
         self.config = load_effective_config(self.project_root)
+        apply_parameter_registry_to_config(self.project_root, self.config)
 
     def _persist_spec_and_lifetime_overrides(
         self,
