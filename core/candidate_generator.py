@@ -22,17 +22,6 @@ def generate_candidates(
     radius_steps = int(neighborhood_config.get("radius_steps", 1))
     max_candidates = int(neighborhood_config.get("max_candidates", 200))
 
-    min_steps: dict[str, Any] = neighborhood_config.get("min_steps", {}) or {}
-
-    def get_min_step(param_name: str) -> float:
-        if param_name in min_steps:
-            try:
-                return float(min_steps[param_name])
-            except Exception:
-                pass
-        # Defaults from design request.
-        return 1.0 if param_name == "rotations" else 0.01
-
     effective_parameter_config = deepcopy(parameter_config or {})
     for p, cfg in (effective_parameter_config or {}).items():
         if not isinstance(cfg, dict):
@@ -40,11 +29,8 @@ def generate_candidates(
         if not cfg.get("is_enabled", True):
             continue
         current_step = float(cfg.get("step", 0.0) or 0.0)
-        ms = float(get_min_step(p) or 0.0)
         if current_step <= 0:
-            cfg["step"] = ms
-        else:
-            cfg["step"] = max(current_step, ms)
+            cfg["step"] = 1.0 if p == "rotations" else 0.01
 
     enabled_params = [
         k
@@ -84,7 +70,7 @@ def generate_candidates(
 
         step = float(cfg.get("step", 0.0) or 0.0)
         if step <= 0:
-            step = get_min_step(p)
+            step = 1.0 if p == "rotations" else 0.01
 
         vals: list[Any] = []
         for k in range(-radius_steps, radius_steps + 1):
@@ -123,6 +109,14 @@ def generate_candidates(
                 cand,
                 {"coupling_group": "total_flow", "total_flow_value": total_flow_value},
             )
+            # Coupling can change derived values; re-quantize/clamp after coupling.
+            cand = enforce_discrete_step(cand, effective_parameter_config)
+
+        # Filter invalid candidates so impossible recipes never propagate.
+        from core.constraints import validate_candidate_parameters
+
+        if validate_candidate_parameters(cand, effective_parameter_config):
+            continue
 
         rows.append(cand)
         if len(rows) >= max_candidates:

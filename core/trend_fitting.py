@@ -120,7 +120,6 @@ def build_lifetime_reference_table(df: pd.DataFrame, config: dict[str, Any]) -> 
     )
 
     parameter_constraints = config.get("parameter_constraints", {})
-    minimum_steps = config.get("minimum_steps", {}) or {}
 
     def quantize_param(param: str, value: Optional[float]) -> Any:
         if value is None or pd.isna(value):
@@ -128,12 +127,8 @@ def build_lifetime_reference_table(df: pd.DataFrame, config: dict[str, Any]) -> 
         pc = parameter_constraints.get(param, {})
         step = float(pc.get("step", 0.0))
         if step <= 0:
-            ms = minimum_steps.get(param, None)
-            if ms is None:
-                # Defaults per technical spec request.
-                step = 1.0 if param == "rotations" else 0.01
-            else:
-                step = float(ms)
+            # Defaults per technical spec request.
+            step = 1.0 if param == "rotations" else 0.01
         if step <= 0:
             return float(value)
 

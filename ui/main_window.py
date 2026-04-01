@@ -125,10 +125,9 @@ class MainWindow(QMainWindow):
         action_settings.triggered.connect(self._open_app_settings)
 
     def _open_app_settings(self) -> None:
-        """Tabbed editor for parameter registry, aliases, minimum steps, and related options."""
+        """Tabbed editor for parameter registry, aliases, and related options."""
 
         def on_apply(payload: dict[str, Any]) -> None:
-            self.user_config["minimum_steps"] = payload.get("minimum_steps", {})
             self.user_config["model_validation_defaults"] = payload.get("model_validation_defaults", {})
             if "scoped_settings" in payload:
                 self.user_config["scoped_settings"] = payload["scoped_settings"]

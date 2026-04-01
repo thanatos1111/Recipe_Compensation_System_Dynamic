@@ -54,7 +54,6 @@ from core.settings_editor import (
     parse_optional_float,
     validate_alias_pairs,
     validate_duplicate_canonicals,
-    validate_minimum_steps_dict,
 )
 
 _DATA_TYPE_LABELS = ("continuous", "discrete_step", "categorical", "boolean")
@@ -145,10 +144,9 @@ class AppSettingsDialog(QDialog):
         w = QWidget()
         v = QVBoxLayout()
         purpose = QLabel(
-            "<b>General</b> shows where settings are saved and lets you edit "
-            "<b>minimum parameter steps</b> (optional global floor on step size per parameter name, "
-            "e.g. for optimization). It does not define process bounds—that is the Parameters tab "
-            "plus scoped profiles."
+            "<b>General</b> shows where settings are saved. "
+            "Parameter bounds and step sizes are configured in <b>Parameters</b> (base) and "
+            "<b>Scoped Parameter Profiles</b> (material/target overrides)."
         )
         purpose.setWordWrap(True)
         v.addWidget(purpose)
@@ -165,24 +163,6 @@ class AppSettingsDialog(QDialog):
         )
         paths.setTextFormat(Qt.TextFormat.RichText)
         v.addWidget(paths)
-
-        grp = QGroupBox("Minimum parameter steps")
-        gv = QVBoxLayout()
-        self._min_steps_table = QTableWidget(0, 2)
-        self._min_steps_table.setHorizontalHeaderLabels(["Parameter", "Minimum step"])
-        self._min_steps_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        gv.addWidget(self._min_steps_table)
-        row_btns = QHBoxLayout()
-        self._min_add = QPushButton("Add row")
-        self._min_del = QPushButton("Remove selected")
-        row_btns.addWidget(self._min_add)
-        row_btns.addWidget(self._min_del)
-        row_btns.addStretch(1)
-        gv.addLayout(row_btns)
-        self._min_add.clicked.connect(self._min_steps_add_row)
-        self._min_del.clicked.connect(self._min_steps_remove_selected)
-        grp.setLayout(gv)
-        v.addWidget(grp)
         v.addStretch(1)
         w.setLayout(v)
         return w
@@ -321,7 +301,6 @@ class AppSettingsDialog(QDialog):
 
         uc = load_user_config(self._project_root)
         self._snapshot_user_config = deepcopy(uc)
-        self._fill_min_steps_table(dict(uc.get("minimum_steps") or {}))
         self._fill_model_defaults(dict(uc.get("model_validation_defaults") or {}))
         self._rebuild_param_table()
         self._rebuild_alias_table_from_registry(self._registry_from_param_rows())
@@ -330,26 +309,6 @@ class AppSettingsDialog(QDialog):
         self._scoped_param_editor.set_profiles(list(scoped.get("parameter_profiles") or []))
         self._scoped_spec_editor.set_profiles(list(scoped.get("spec_profiles") or []))
         self._clear_validation()
-
-    def _fill_min_steps_table(self, steps: dict[str, Any]) -> None:
-        self._min_steps_table.setRowCount(0)
-        for k, v in sorted(steps.items(), key=lambda kv: str(kv[0]).lower()):
-            self._min_steps_add_row(str(k), v)
-
-    def _min_steps_add_row(self, name: str = "", value: Any = 0.0) -> None:
-        r = self._min_steps_table.rowCount()
-        self._min_steps_table.insertRow(r)
-        self._min_steps_table.setItem(r, 0, QTableWidgetItem(str(name)))
-        try:
-            fv = float(value)
-        except (TypeError, ValueError):
-            fv = 0.0
-        self._min_steps_table.setItem(r, 1, QTableWidgetItem(str(fv)))
-
-    def _min_steps_remove_selected(self) -> None:
-        rows = sorted({i.row() for i in self._min_steps_table.selectedIndexes()}, reverse=True)
-        for r in rows:
-            self._min_steps_table.removeRow(r)
 
     def _fill_model_defaults(self, d: dict[str, Any]) -> None:
         sm = str(d.get("default_split_mode") or "")
@@ -602,20 +561,6 @@ class AppSettingsDialog(QDialog):
 
     # --- validation / persist ---
 
-    def _gather_minimum_steps(self) -> dict[str, float]:
-        out: dict[str, float] = {}
-        for r in range(self._min_steps_table.rowCount()):
-            k_item = self._min_steps_table.item(r, 0)
-            v_item = self._min_steps_table.item(r, 1)
-            k = (k_item.text() if k_item else "").strip()
-            if not k:
-                continue
-            try:
-                out[k] = float((v_item.text() if v_item else "0").strip() or 0)
-            except ValueError:
-                raise ValueError(f"Minimum steps row {r + 1}: step is not a valid number.") from None
-        return out
-
     def _gather_model_defaults(self) -> dict[str, Any]:
         sm = self._split_combo.currentText().strip()
         cm = self._cutoff_combo.currentText().strip()
@@ -645,11 +590,6 @@ class AppSettingsDialog(QDialog):
         errors.extend(merge_registry_validation_messages(reg))
         canonicals = set(reg._by_canonical.keys())
         errors.extend(validate_alias_pairs(self._get_alias_pairs(), canonicals))
-        try:
-            ms = self._gather_minimum_steps()
-            errors.extend(validate_minimum_steps_dict(ms))
-        except ValueError as e:
-            errors.append(str(e))
         errors.extend(self._scoped_param_editor.validate_all())
         errors.extend(self._scoped_spec_editor.validate_all())
         return errors
@@ -666,7 +606,6 @@ class AppSettingsDialog(QDialog):
         reg = self._registry_from_param_rows()
         apply_alias_pairs_to_registry(reg, self._get_alias_pairs())
         save_user_parameter_registry(self._project_root, reg)
-        ms = self._gather_minimum_steps()
         mvd = self._gather_model_defaults()
         scoped_payload = {
             "version": SCOPED_SETTINGS_VERSION,
@@ -674,7 +613,6 @@ class AppSettingsDialog(QDialog):
             "spec_profiles": self._scoped_spec_editor.get_profiles(),
         }
         return {
-            "minimum_steps": ms,
             "model_validation_defaults": mvd,
             "scoped_settings": scoped_payload,
         }

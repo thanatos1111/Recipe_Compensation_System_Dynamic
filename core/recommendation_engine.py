@@ -17,7 +17,6 @@ from core.schemas import SpecConfig
 
 def _effective_parameter_config(config: dict[str, Any]) -> dict[str, Any]:
     parameter_config = config.get("parameter_constraints", {}) or {}
-    min_steps = config.get("minimum_steps", {}) or {}
 
     def default_min_step(param_name: str) -> float:
         return 1.0 if param_name == "rotations" else 0.01
@@ -29,11 +28,10 @@ def _effective_parameter_config(config: dict[str, Any]) -> dict[str, Any]:
             continue
         eff = dict(pcfg)
         current_step = float(eff.get("step", 0.0) or 0.0)
-        ms = float(min_steps.get(pname, default_min_step(pname)) or 0.0)
         if current_step <= 0:
-            eff["step"] = ms
+            eff["step"] = default_min_step(pname)
         else:
-            eff["step"] = max(current_step, ms)
+            eff["step"] = current_step
         effective[pname] = eff
     return effective
 

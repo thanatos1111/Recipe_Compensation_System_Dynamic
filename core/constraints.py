@@ -8,6 +8,57 @@ import math
 from typing import Any
 
 
+def _value_in_driver_span(driver_value: float, rule: dict[str, Any]) -> bool:
+    dmin = rule.get("driver_min", None)
+    dmax = rule.get("driver_max", None)
+    if dmin is not None and driver_value < float(dmin) - 1e-12:
+        return False
+    if dmax is not None and driver_value > float(dmax) + 1e-12:
+        return False
+    return True
+
+
+def _effective_bounds_from_dependent_rules(
+    cfg: dict[str, Any],
+    candidate: dict[str, Any],
+) -> tuple[Any, Any]:
+    """
+    Resolve effective (min_value, max_value) for a parameter config dict, honoring
+    a legacy ``dependent_constraints`` list when present.
+    """
+    min_value = cfg.get("min_value", None)
+    max_value = cfg.get("max_value", None)
+    dcs = cfg.get("dependent_constraints")
+    if not isinstance(dcs, list) or not dcs:
+        return min_value, max_value
+    for dc in dcs:
+        if not isinstance(dc, dict):
+            continue
+        driver = str(dc.get("driver_parameter", "")).strip()
+        if not driver:
+            continue
+        if driver not in candidate:
+            continue
+        dv_raw = candidate.get(driver)
+        if dv_raw is None or (isinstance(dv_raw, float) and math.isnan(dv_raw)):
+            continue
+        try:
+            dv = float(dv_raw)
+        except (TypeError, ValueError):
+            continue
+        rules = dc.get("rules")
+        if not isinstance(rules, list):
+            continue
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            if _value_in_driver_span(dv, rule):
+                rmin = rule.get("min_value", None)
+                rmax = rule.get("max_value", None)
+                return (min_value if rmin is None else rmin, max_value if rmax is None else rmax)
+    return min_value, max_value
+
+
 def validate_candidate_parameters(candidate: dict[str, Any], parameter_config: dict[str, Any]) -> list[str]:
     """Return a list of constraint violation messages."""
     violations: list[str] = []
@@ -29,8 +80,7 @@ def validate_candidate_parameters(candidate: dict[str, Any], parameter_config: d
                 continue
 
         step = float(cfg.get("step", 0.0) or 0.0)
-        min_value = cfg.get("min_value", None)
-        max_value = cfg.get("max_value", None)
+        min_value, max_value = _effective_bounds_from_dependent_rules(cfg, candidate)
 
         # If bounds look like placeholders (0/0), don't hard-enforce.
         bounds_set = min_value is not None and max_value is not None and not (
@@ -63,8 +113,7 @@ def enforce_discrete_step(candidate: dict[str, Any], parameter_config: dict[str,
         if not isinstance(cfg, dict):
             continue
         step = float(cfg.get("step", 0.0) or 0.0)
-        min_value = cfg.get("min_value", None)
-        max_value = cfg.get("max_value", None)
+        min_value, max_value = _effective_bounds_from_dependent_rules(cfg, out)
 
         if step <= 0:
             continue

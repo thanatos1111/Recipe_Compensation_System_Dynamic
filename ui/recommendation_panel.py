@@ -249,12 +249,11 @@ class RecommendationPanel(QWidget):
         from core.safe_band import estimate_multi_parameter_bands
 
         parameter_config = self._config.get("parameter_constraints", {})
-        min_steps = self._config.get("minimum_steps", {}) or {}
 
         def default_min_step(param_name: str) -> float:
             return 1.0 if param_name == "rotations" else 0.01
 
-        # Ensure candidate generation + quantization always respect minimum steps.
+        # Ensure candidate generation + quantization always have a usable step.
         effective_parameter_config: dict[str, Any] = {}
         for pname, pcfg in (parameter_config or {}).items():
             if not isinstance(pcfg, dict):
@@ -262,16 +261,14 @@ class RecommendationPanel(QWidget):
                 continue
             eff = dict(pcfg)
             current_step = float(eff.get("step", 0.0) or 0.0)
-            ms = float(min_steps.get(pname, default_min_step(pname)))
             if current_step <= 0:
-                eff["step"] = ms
+                eff["step"] = default_min_step(pname)
             else:
-                eff["step"] = max(current_step, ms)
+                eff["step"] = current_step
             effective_parameter_config[pname] = eff
         neighborhood_config = {
             "radius_steps": int(self.radius_steps_spin.value()),
             "max_candidates": int(self.max_candidates_spin.value()),
-            "min_steps": min_steps,
         }
 
         candidates = generate_candidates(reference_recipe, effective_parameter_config, neighborhood_config)

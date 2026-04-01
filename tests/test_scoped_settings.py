@@ -15,6 +15,7 @@ from core.scoped_settings import (
     matching_spec_profiles_ordered,
     matching_parameter_profiles_ordered,
     merge_parameter_constraints_delta,
+    resolve_effective_spec_dict,
     resolve_parameter_override_delta,
     target_position_from_target_id,
     validate_scoped_parameter_profile,
@@ -53,6 +54,26 @@ class TestScopedSettings(unittest.TestCase):
         }
         m = matching_spec_profiles_ordered(scoped, "Ta (sheet)", 7)
         self.assertEqual([p.get("id") for p in m], ["s1"])
+
+    def test_resolve_effective_spec_precedence_material_then_target(self) -> None:
+        cfg = {
+            "spec_settings": {"rs_target": 10.0, "use_rs_spec": True},
+            "material_overrides": {"materials": {"Ta": {"spec_settings": {"rs_target": 999.0}}}},
+        }
+        scoped = {
+            "version": 1,
+            "parameter_profiles": [],
+            "spec_profiles": [
+                {"id": "mat", "enabled": True, "material_name": "Ta", "priority": 0, "spec": {"rs_target": 20.0}},
+                {"id": "tp", "enabled": True, "material_name": "Ta", "target_position": 7, "priority": 0, "spec": {"rs_target": 30.0}},
+            ],
+        }
+        # Material-only profile should override legacy material override.
+        out_mat = resolve_effective_spec_dict(cfg, scoped, material_name="Ta", target_id=None)
+        self.assertEqual(out_mat.get("rs_target"), 20.0)
+        # Target-position profile should override material-only.
+        out_tp = resolve_effective_spec_dict(cfg, scoped, material_name="Ta", target_id="Ta.7")
+        self.assertEqual(out_tp.get("rs_target"), 30.0)
 
     def test_scoped_delta_merges_linear_offset(self) -> None:
         scoped = default_scoped_settings_dict()
