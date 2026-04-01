@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -24,6 +25,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -33,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.config_store import load_user_config
+from core.scoped_settings import SCOPED_SETTINGS_VERSION, load_effective_scoped_settings
 from core.parameter_registry import (
     ParameterDataType,
     ParameterDefinition,
@@ -40,6 +44,7 @@ from core.parameter_registry import (
     load_effective_parameter_registry,
     save_user_parameter_registry,
 )
+from ui.scoped_profiles_tabs import ScopedParameterProfilesEditor, ScopedSpecProfilesEditor
 from core.settings_editor import (
     apply_alias_pairs_to_registry,
     collect_alias_pairs,
@@ -75,7 +80,8 @@ class AppSettingsDialog(QDialog):
         self._project_root = project_root
         self._on_apply = on_apply
         self.setWindowTitle("Settings")
-        self.setMinimumSize(920, 560)
+        self.resize(840, 520)
+        self.setMinimumSize(680, 380)
 
         self._snapshot_user_config = deepcopy(initial_user_config)
         self._dep_by_canonical: dict[str, Any] = {}
@@ -84,16 +90,36 @@ class AppSettingsDialog(QDialog):
         self._validation_label = QLabel("")
         self._validation_label.setWordWrap(True)
         self._validation_label.setStyleSheet("color: #a33;")
+        self._validation_label.setMaximumHeight(96)
 
         layout = QVBoxLayout()
         self.tabs = QTabWidget()
+        self.tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.tabs.addTab(self._build_general_tab(), "General")
         self.tabs.addTab(self._build_parameters_tab(), "Parameters")
         self.tabs.addTab(self._build_aliases_tab(), "Parameter Aliases / Excel Matching")
         self.tabs.addTab(self._build_dependent_tab(), "Dependent Rules")
         self.tabs.addTab(self._build_model_defaults_tab(), "Model / Validation Defaults")
-        layout.addWidget(self.tabs)
-        layout.addWidget(self._validation_label)
+        self._scoped_param_editor = ScopedParameterProfilesEditor()
+        self.tabs.addTab(self._scoped_param_editor, "Scoped Parameter Profiles")
+        self._scoped_spec_editor = ScopedSpecProfilesEditor()
+        self.tabs.addTab(self._scoped_spec_editor, "Scoped Spec Profiles")
+
+        scroll_inner = QWidget()
+        scroll_layout = QVBoxLayout(scroll_inner)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.addWidget(self.tabs)
+        scroll_layout.addWidget(self._validation_label)
+
+        self._content_scroll = QScrollArea()
+        self._content_scroll.setWidgetResizable(True)
+        self._content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._content_scroll.setWidget(scroll_inner)
+        self._content_scroll.setMinimumHeight(260)
+
+        layout.addWidget(self._content_scroll, stretch=1)
 
         btn_row = QHBoxLayout()
         self._btn_save = QPushButton("Save")
@@ -118,6 +144,14 @@ class AppSettingsDialog(QDialog):
     def _build_general_tab(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout()
+        purpose = QLabel(
+            "<b>General</b> shows where settings are saved and lets you edit "
+            "<b>minimum parameter steps</b> (optional global floor on step size per parameter name, "
+            "e.g. for optimization). It does not define process bounds—that is the Parameters tab "
+            "plus scoped profiles."
+        )
+        purpose.setWordWrap(True)
+        v.addWidget(purpose)
         info = QLabel(
             "User settings file and parameter registry are stored under the project "
             "<b>config</b> folder. Changes apply after Save or Apply."
@@ -126,7 +160,8 @@ class AppSettingsDialog(QDialog):
         v.addWidget(info)
         paths = QLabel(
             f"<code>config/user_config.json</code><br/>"
-            f"<code>config/user_parameter_registry.json</code>"
+            f"<code>config/user_parameter_registry.json</code><br/>"
+            f"<code>config/default_scoped_settings.json</code>"
         )
         paths.setTextFormat(Qt.TextFormat.RichText)
         v.addWidget(paths)
@@ -155,6 +190,16 @@ class AppSettingsDialog(QDialog):
     def _build_parameters_tab(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout()
+        hint = QLabel(
+            "<b>Global parameter registry</b>: canonical names, display labels, types, and default "
+            "min/max/step for every material. "
+            "<b>Enabled</b> turns a parameter on or off for modeling, candidates, and validation—"
+            "disable parameters you never tune. "
+            "<b>Scoped parameter profiles</b> (other tab) further override bounds for a material "
+            "and/or target position <i>on top of</i> these defaults when a scope matches."
+        )
+        hint.setWordWrap(True)
+        v.addWidget(hint)
         self._param_table = QTableWidget(0, 9)
         self._param_table.setHorizontalHeaderLabels(
             [
@@ -281,6 +326,9 @@ class AppSettingsDialog(QDialog):
         self._rebuild_param_table()
         self._rebuild_alias_table_from_registry(self._registry_from_param_rows())
         self._refresh_dependent_view()
+        scoped = load_effective_scoped_settings(self._project_root, uc)
+        self._scoped_param_editor.set_profiles(list(scoped.get("parameter_profiles") or []))
+        self._scoped_spec_editor.set_profiles(list(scoped.get("spec_profiles") or []))
         self._clear_validation()
 
     def _fill_min_steps_table(self, steps: dict[str, Any]) -> None:
@@ -602,6 +650,8 @@ class AppSettingsDialog(QDialog):
             errors.extend(validate_minimum_steps_dict(ms))
         except ValueError as e:
             errors.append(str(e))
+        errors.extend(self._scoped_param_editor.validate_all())
+        errors.extend(self._scoped_spec_editor.validate_all())
         return errors
 
     def _set_validation(self, message: str) -> None:
@@ -618,9 +668,15 @@ class AppSettingsDialog(QDialog):
         save_user_parameter_registry(self._project_root, reg)
         ms = self._gather_minimum_steps()
         mvd = self._gather_model_defaults()
+        scoped_payload = {
+            "version": SCOPED_SETTINGS_VERSION,
+            "parameter_profiles": self._scoped_param_editor.get_profiles(),
+            "spec_profiles": self._scoped_spec_editor.get_profiles(),
+        }
         return {
             "minimum_steps": ms,
             "model_validation_defaults": mvd,
+            "scoped_settings": scoped_payload,
         }
 
     def _on_apply_clicked(self) -> None:

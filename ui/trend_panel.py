@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import pandas as pd
 from PySide6.QtWidgets import QComboBox, QLabel, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
 from core.schemas import MaterialDataset
@@ -150,11 +151,8 @@ class TrendPanel(QWidget):
         for r in range(len(baseline_df)):
             for c, col_name in enumerate(baseline_df.columns):
                 value = baseline_df.iloc[r][col_name]
-                # Handle NaN to keep cells empty.
-                try:
-                    is_nan = value != value
-                except Exception:
-                    is_nan = False
-                text = "" if value is None or is_nan else str(value)
+                # Keep missing values empty (NaN, pandas.NA, None, NaT, etc.).
+                is_missing = value is None or bool(pd.isna(value))
+                text = "" if is_missing else str(value)
                 self.baseline_table.setItem(r, c, QTableWidgetItem(text))
 

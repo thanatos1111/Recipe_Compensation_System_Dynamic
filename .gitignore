@@ -21,3 +21,4 @@ Thumbs.db
 
 # User-specific persisted settings (do not commit).
 config/user_config.json
+config/user_parameter_registry.json

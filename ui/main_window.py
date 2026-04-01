@@ -17,6 +17,12 @@ from PySide6.QtWidgets import QLabel, QMainWindow, QMenu, QMenuBar, QTabWidget, 
 from core.config_store import load_effective_config, load_user_config, save_user_config
 from core.material_manager import MaterialManager
 from core.parameter_registry import apply_parameter_registry_to_config
+from core.scoped_settings import (
+    apply_scoped_parameter_constraints_to_config,
+    load_effective_scoped_settings,
+    resolve_effective_max_lifetime,
+    resolve_effective_spec_dict,
+)
 from core.labeling import compute_derived_features
 from core.schemas import SpecConfig
 
@@ -47,6 +53,7 @@ class MainWindow(QMainWindow):
 
         self.config = load_effective_config(self.project_root)
         apply_parameter_registry_to_config(self.project_root, self.config)
+        self._scoped = load_effective_scoped_settings(self.project_root, self.user_config)
         self.column_map = self.config.get("column_mapping", {})
         self._spec_config = self._spec_config_from_config(self.config.get("spec_settings", {}))
 
@@ -123,18 +130,38 @@ class MainWindow(QMainWindow):
         def on_apply(payload: dict[str, Any]) -> None:
             self.user_config["minimum_steps"] = payload.get("minimum_steps", {})
             self.user_config["model_validation_defaults"] = payload.get("model_validation_defaults", {})
+            if "scoped_settings" in payload:
+                self.user_config["scoped_settings"] = payload["scoped_settings"]
             save_user_config(self.project_root, self.user_config)
-            self.config = load_effective_config(self.project_root)
-            apply_parameter_registry_to_config(self.project_root, self.config)
+            self._sync_config_for_active_selection()
 
             if self._current_material and self._current_target_id:
                 dataset = self.material_manager.get_material(self._current_material)
+                self._spec_config = self._get_effective_spec_for_selection(
+                    self._current_material, self._current_target_id
+                )
+                self._max_lifetime = self._get_effective_max_lifetime(
+                    self._current_material, self._current_target_id
+                )
+                self.spec_panel.set_spec_config(self._spec_config)
+                self._apply_spec_and_derived_to_material(dataset)
+                self.raw_table_panel.set_material_dataframe(dataset.all_records)
                 self.trend_panel.set_context(
                     dataset,
                     active_target_id=self._current_target_id,
                     config=self.config,
                 )
+                self.model_panel.set_context(
+                    dataset,
+                    active_target_id=self._current_target_id,
+                    config=self.config,
+                )
                 self.recommendation_panel.set_context(
+                    dataset,
+                    active_target_id=self._current_target_id,
+                    config=self.config,
+                )
+                self.update_panel.set_context(
                     dataset,
                     active_target_id=self._current_target_id,
                     config=self.config,
@@ -147,6 +174,20 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         dlg.exec()
+
+    def _sync_config_for_active_selection(self) -> None:
+        """Reload effective config, apply registry, then scoped parameter overrides for active target."""
+        self.config = load_effective_config(self.project_root)
+        apply_parameter_registry_to_config(self.project_root, self.config)
+        self._scoped = load_effective_scoped_settings(self.project_root, self.user_config)
+        if self._current_material and self._current_target_id:
+            apply_scoped_parameter_constraints_to_config(
+                self.project_root,
+                self.config,
+                material_name=self._current_material,
+                target_id=self._current_target_id,
+                scoped=self._scoped,
+            )
 
     def _on_tab_changed(self, _index: int) -> None:
         if _index != self.tab_trends_index:
@@ -177,36 +218,22 @@ class MainWindow(QMainWindow):
             use_rsu_spec=bool(spec.get("use_rsu_spec", rsu_max > 0)),
         )
 
-    def _get_override_block(self, material_name: str) -> dict[str, Any]:
-        return (
-            self.config.get("material_overrides", {})
-            .get("materials", {})
-            .get(material_name, {})
-        )
-
     def _get_effective_spec_for_selection(self, material_name: str, target_id: Optional[str]) -> SpecConfig:
-        base_spec = self.config.get("spec_settings", {})
-        material_block = self._get_override_block(material_name)
-        material_spec = material_block.get("spec_settings", {})
-        target_spec = {}
-        if target_id:
-            target_spec = material_block.get("targets", {}).get(target_id, {}).get("spec_settings", {})
-
-        # Merge base -> material -> target
-        merged = dict(base_spec)
-        merged.update(material_spec or {})
-        merged.update(target_spec or {})
+        merged = resolve_effective_spec_dict(
+            self.config,
+            self._scoped,
+            material_name=material_name,
+            target_id=target_id,
+        )
         return self._spec_config_from_config(merged)
 
     def _get_effective_max_lifetime(self, material_name: str, target_id: Optional[str]) -> Optional[float]:
-        material_block = self._get_override_block(material_name)
-        # target overrides material
-        if target_id:
-            v = material_block.get("targets", {}).get(target_id, {}).get("max_lifetime", None)
-            if v is not None:
-                return float(v)
-        v2 = material_block.get("max_lifetime", None)
-        return float(v2) if v2 is not None else None
+        return resolve_effective_max_lifetime(
+            self.config,
+            self._scoped,
+            material_name=material_name,
+            target_id=target_id,
+        )
 
     def _open_workbook(self, workbook_path: str) -> None:
         # Persist last opened workbook path.
@@ -230,6 +257,7 @@ class MainWindow(QMainWindow):
 
     def _on_material_selected(self, material_name: str) -> None:
         self._current_material = material_name
+        self._current_target_id = None
         dataset = self.material_manager.get_material(material_name)
 
         # Load effective spec/max_lifetime for this material (target-specific applied after target selection).
@@ -257,7 +285,9 @@ class MainWindow(QMainWindow):
             self.raw_table_panel.set_dataframe(None)  # type: ignore[arg-type]
             return
 
-        # Apply target-specific overrides for spec/max_lifetime.
+        self._sync_config_for_active_selection()
+
+        # Apply target-specific overrides for spec/max_lifetime (scoped + legacy).
         self._spec_config = self._get_effective_spec_for_selection(self._current_material, target_id)
         self._max_lifetime = self._get_effective_max_lifetime(self._current_material, target_id)
         self.spec_panel.set_spec_config(self._spec_config)
@@ -313,8 +343,7 @@ class MainWindow(QMainWindow):
 
         # Reload effective config (so newly-saved overrides are reflected).
         self.user_config = load_user_config(self.project_root)
-        self.config = load_effective_config(self.project_root)
-        apply_parameter_registry_to_config(self.project_root, self.config)
+        self._sync_config_for_active_selection()
 
     def _persist_spec_and_lifetime_overrides(
         self,

@@ -1,0 +1,462 @@
+{
+  "version": 1,
+  "parameter_profiles": [
+    {
+      "id": "preset-tp-1",
+      "enabled": true,
+      "material_name": "",
+      "target_position": 1,
+      "notes": "Default target-position preset (Prompt 2.1)",
+      "priority": 0,
+      "parameter_overrides": {
+        "linear_offset": {
+          "type": "continuous",
+          "min_value": -190.0,
+          "max_value": 15.0,
+          "step": 0.1,
+          "is_enabled": true
+        },
+        "incident_angle": {
+          "dependent_constraints": [
+            {
+              "driver_parameter": "linear_offset",
+              "rules": [
+                {
+                  "driver_min": -190.0,
+                  "driver_max": -175.0,
+                  "min_value": 0.0,
+                  "max_value": 46.0
+                },
+                {
+                  "driver_min": -175.0,
+                  "driver_max": 15.0,
+                  "min_value": 0.0,
+                  "max_value": 50.0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "preset-tp-2",
+      "enabled": true,
+      "material_name": "",
+      "target_position": 2,
+      "notes": "Default target-position preset (Prompt 2.1)",
+      "priority": 0,
+      "parameter_overrides": {
+        "linear_offset": {
+          "type": "continuous",
+          "min_value": -190.0,
+          "max_value": 15.0,
+          "step": 0.1,
+          "is_enabled": true
+        },
+        "incident_angle": {
+          "dependent_constraints": [
+            {
+              "driver_parameter": "linear_offset",
+              "rules": [
+                {
+                  "driver_min": -190.0,
+                  "driver_max": -175.0,
+                  "min_value": 18.0,
+                  "max_value": 78.0
+                },
+                {
+                  "driver_min": -175.0,
+                  "driver_max": 15.0,
+                  "min_value": 14.0,
+                  "max_value": 78.0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "preset-tp-3",
+      "enabled": true,
+      "material_name": "",
+      "target_position": 3,
+      "notes": "Default target-position preset (Prompt 2.1)",
+      "priority": 0,
+      "parameter_overrides": {
+        "linear_offset": {
+          "type": "continuous",
+          "min_value": -190.0,
+          "max_value": 15.0,
+          "step": 0.1,
+          "is_enabled": true
+        },
+        "incident_angle": {
+          "dependent_constraints": [
+            {
+              "driver_parameter": "linear_offset",
+              "rules": [
+                {
+                  "driver_min": -190.0,
+                  "driver_max": -175.0,
+                  "min_value": 0.0,
+                  "max_value": 46.0
+                },
+                {
+                  "driver_min": -175.0,
+                  "driver_max": 15.0,
+                  "min_value": 0.0,
+                  "max_value": 50.0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "preset-tp-4",
+      "enabled": true,
+      "material_name": "",
+      "target_position": 4,
+      "notes": "Default target-position preset (Prompt 2.1)",
+      "priority": 0,
+      "parameter_overrides": {
+        "linear_offset": {
+          "type": "continuous",
+          "min_value": -190.0,
+          "max_value": 15.0,
+          "step": 0.1,
+          "is_enabled": true
+        },
+        "incident_angle": {
+          "dependent_constraints": [
+            {
+              "driver_parameter": "linear_offset",
+              "rules": [
+                {
+                  "driver_min": -190.0,
+                  "driver_max": -175.0,
+                  "min_value": 18.0,
+                  "max_value": 78.0
+                },
+                {
+                  "driver_min": -175.0,
+                  "driver_max": 15.0,
+                  "min_value": 14.0,
+                  "max_value": 78.0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "preset-tp-5",
+      "enabled": true,
+      "material_name": "",
+      "target_position": 5,
+      "notes": "Default target-position preset (Prompt 2.1)",
+      "priority": 0,
+      "parameter_overrides": {
+        "linear_offset": {
+          "type": "continuous",
+          "min_value": -15.0,
+          "max_value": 190.0,
+          "step": 0.1,
+          "is_enabled": true
+        },
+        "incident_angle": {
+          "dependent_constraints": [
+            {
+              "driver_parameter": "linear_offset",
+              "rules": [
+                {
+                  "driver_min": 175.0,
+                  "driver_max": 190.0,
+                  "min_value": 0.0,
+                  "max_value": 46.0
+                },
+                {
+                  "driver_min": -15.0,
+                  "driver_max": 175.0,
+                  "min_value": 0.0,
+                  "max_value": 50.0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "preset-tp-6",
+      "enabled": true,
+      "material_name": "",
+      "target_position": 6,
+      "notes": "Default target-position preset (Prompt 2.1)",
+      "priority": 0,
+      "parameter_overrides": {
+        "linear_offset": {
+          "type": "continuous",
+          "min_value": -15.0,
+          "max_value": 190.0,
+          "step": 0.1,
+          "is_enabled": true
+        },
+        "incident_angle": {
+          "dependent_constraints": [
+            {
+              "driver_parameter": "linear_offset",
+              "rules": [
+                {
+                  "driver_min": 175.0,
+                  "driver_max": 190.0,
+                  "min_value": 18.0,
+                  "max_value": 78.0
+                },
+                {
+                  "driver_min": -15.0,
+                  "driver_max": 175.0,
+                  "min_value": 14.0,
+                  "max_value": 78.0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "preset-tp-7",
+      "enabled": true,
+      "material_name": "",
+      "target_position": 7,
+      "notes": "Default target-position preset (Prompt 2.1)",
+      "priority": 0,
+      "parameter_overrides": {
+        "linear_offset": {
+          "type": "continuous",
+          "min_value": -190.0,
+          "max_value": 15.0,
+          "step": 0.1,
+          "is_enabled": true
+        },
+        "incident_angle": {
+          "dependent_constraints": [
+            {
+              "driver_parameter": "linear_offset",
+              "rules": [
+                {
+                  "driver_min": -190.0,
+                  "driver_max": -175.0,
+                  "min_value": 0.0,
+                  "max_value": 46.0
+                },
+                {
+                  "driver_min": -175.0,
+                  "driver_max": 15.0,
+                  "min_value": 0.0,
+                  "max_value": 50.0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "preset-tp-8",
+      "enabled": true,
+      "material_name": "",
+      "target_position": 8,
+      "notes": "Default target-position preset (Prompt 2.1)",
+      "priority": 0,
+      "parameter_overrides": {
+        "linear_offset": {
+          "type": "continuous",
+          "min_value": -190.0,
+          "max_value": 15.0,
+          "step": 0.1,
+          "is_enabled": true
+        },
+        "incident_angle": {
+          "dependent_constraints": [
+            {
+              "driver_parameter": "linear_offset",
+              "rules": [
+                {
+                  "driver_min": -190.0,
+                  "driver_max": -175.0,
+                  "min_value": 18.0,
+                  "max_value": 78.0
+                },
+                {
+                  "driver_min": -175.0,
+                  "driver_max": 15.0,
+                  "min_value": 14.0,
+                  "max_value": 78.0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "preset-tp-9",
+      "enabled": true,
+      "material_name": "",
+      "target_position": 9,
+      "notes": "Default target-position preset (Prompt 2.1)",
+      "priority": 0,
+      "parameter_overrides": {
+        "linear_offset": {
+          "type": "continuous",
+          "min_value": -190.0,
+          "max_value": 15.0,
+          "step": 0.1,
+          "is_enabled": true
+        },
+        "incident_angle": {
+          "dependent_constraints": [
+            {
+              "driver_parameter": "linear_offset",
+              "rules": [
+                {
+                  "driver_min": -190.0,
+                  "driver_max": -175.0,
+                  "min_value": 0.0,
+                  "max_value": 46.0
+                },
+                {
+                  "driver_min": -175.0,
+                  "driver_max": 15.0,
+                  "min_value": 0.0,
+                  "max_value": 50.0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "preset-tp-10",
+      "enabled": true,
+      "material_name": "",
+      "target_position": 10,
+      "notes": "Default target-position preset (Prompt 2.1)",
+      "priority": 0,
+      "parameter_overrides": {
+        "linear_offset": {
+          "type": "continuous",
+          "min_value": -190.0,
+          "max_value": 15.0,
+          "step": 0.1,
+          "is_enabled": true
+        },
+        "incident_angle": {
+          "dependent_constraints": [
+            {
+              "driver_parameter": "linear_offset",
+              "rules": [
+                {
+                  "driver_min": -190.0,
+                  "driver_max": -175.0,
+                  "min_value": 18.0,
+                  "max_value": 78.0
+                },
+                {
+                  "driver_min": -175.0,
+                  "driver_max": 15.0,
+                  "min_value": 14.0,
+                  "max_value": 78.0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "preset-tp-11",
+      "enabled": true,
+      "material_name": "",
+      "target_position": 11,
+      "notes": "Default target-position preset (Prompt 2.1)",
+      "priority": 0,
+      "parameter_overrides": {
+        "linear_offset": {
+          "type": "continuous",
+          "min_value": -15.0,
+          "max_value": 190.0,
+          "step": 0.1,
+          "is_enabled": true
+        },
+        "incident_angle": {
+          "dependent_constraints": [
+            {
+              "driver_parameter": "linear_offset",
+              "rules": [
+                {
+                  "driver_min": 175.0,
+                  "driver_max": 190.0,
+                  "min_value": 0.0,
+                  "max_value": 46.0
+                },
+                {
+                  "driver_min": -15.0,
+                  "driver_max": 175.0,
+                  "min_value": 0.0,
+                  "max_value": 50.0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "preset-tp-12",
+      "enabled": true,
+      "material_name": "",
+      "target_position": 12,
+      "notes": "Default target-position preset (Prompt 2.1)",
+      "priority": 0,
+      "parameter_overrides": {
+        "linear_offset": {
+          "type": "continuous",
+          "min_value": -15.0,
+          "max_value": 190.0,
+          "step": 0.1,
+          "is_enabled": true
+        },
+        "incident_angle": {
+          "dependent_constraints": [
+            {
+              "driver_parameter": "linear_offset",
+              "rules": [
+                {
+                  "driver_min": 175.0,
+                  "driver_max": 190.0,
+                  "min_value": 18.0,
+                  "max_value": 78.0
+                },
+                {
+                  "driver_min": -15.0,
+                  "driver_max": 175.0,
+                  "min_value": 14.0,
+                  "max_value": 78.0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "spec_profiles": []
+}
