@@ -440,6 +440,53 @@ def migrate_legacy_parameter_constraints(
     return reg
 
 
+def _apply_legacy_dict_to_definition(defn: ParameterDefinition, cfg: dict[str, Any]) -> None:
+    """
+    Apply a legacy ``parameter_constraints`` entry onto *defn* (mutates in place).
+
+    Clears ``simple_range`` so min/max/step match the flat fields used by the legacy
+    projection (same as :func:`parameter_definition_to_legacy_entry`).
+    """
+    defn.data_type = _legacy_type_to_data_type(cfg.get("type"))
+    defn.min_value = _maybe_float(cfg.get("min_value"))
+    defn.max_value = _maybe_float(cfg.get("max_value"))
+    defn.step = float(cfg.get("step", 0.0) or 0.0)
+    defn.enabled = bool(cfg.get("is_enabled", True))
+    defn.allowed_values = cfg.get("allowed_values")
+    defn.is_coupled = bool(cfg.get("is_coupled", False))
+    defn.coupling_group = cfg.get("coupling_group")
+    defn.simple_range = None
+
+
+def build_effective_registry(
+    base_reg: ParameterRegistry,
+    merged_pc: dict[str, Any],
+    column_mapping: Optional[dict[str, Any]] = None,
+) -> ParameterRegistry:
+    """
+    Copy *base_reg* and sync every parameter from *merged_pc* (final legacy dict).
+
+    Parameters present only in *merged_pc* are added using the same rules as
+    :func:`migrate_legacy_parameter_constraints` (for display names / aliases).
+    """
+    out = ParameterRegistry()
+    for d in base_reg._by_canonical.values():
+        out.add(deepcopy(d))
+
+    for pname, pcfg in (merged_pc or {}).items():
+        if not isinstance(pcfg, dict):
+            continue
+        existing = out.get_by_canonical(pname)
+        if existing is not None:
+            _apply_legacy_dict_to_definition(existing, pcfg)
+        else:
+            sub = migrate_legacy_parameter_constraints({pname: pcfg}, column_mapping)
+            for d in sub._by_canonical.values():
+                out.add(deepcopy(d))
+    out.rebuild_indexes()
+    return out
+
+
 def validate_parameter_definition(defn: ParameterDefinition) -> ParameterValidationResult:
     issues: list[ValidationIssue] = []
     if not defn.canonical_name.strip():
@@ -570,6 +617,7 @@ def apply_parameter_registry_to_config(project_root: Path, config: dict[str, Any
     - Deep-merges legacy user overrides from ``config['parameter_constraints']`` on top.
     - Sets ``config['parameter_constraints']`` to the result.
     - Attaches ``config['_parameter_registry']`` for callers that need lookup/validation.
+      The registry object reflects the same merged constraints as ``parameter_constraints``.
     """
     reg_disk = load_effective_parameter_registry(project_root)
     column_mapping = config.get("column_mapping", {}) or {}
@@ -585,11 +633,6 @@ def apply_parameter_registry_to_config(project_root: Path, config: dict[str, Any
     merged_pc = deep_merge(base_legacy, legacy_merged)
     config["parameter_constraints"] = merged_pc
 
-    # Prefer disk registry when present; else migrated registry matches merged legacy base.
-    if reg_disk._by_canonical:
-        reg = reg_disk
-    else:
-        reg = migrate_legacy_parameter_constraints(merged_pc, column_mapping)
-
-    config["_parameter_registry"] = reg
-    return reg
+    effective_reg = build_effective_registry(base_reg, merged_pc, column_mapping)
+    config["_parameter_registry"] = effective_reg
+    return effective_reg

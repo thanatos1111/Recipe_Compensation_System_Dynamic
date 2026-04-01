@@ -17,7 +17,6 @@ from core.parameter_registry import (
     parameter_definition_to_legacy_entry,
     validate_parameter_definition,
     validate_parameter_value,
-    validate_registry,
 )
 
 
@@ -124,12 +123,21 @@ class TestParameterRegistry(unittest.TestCase):
             },
         }
         apply_parameter_registry_to_config(project_root, cfg)
-        self.assertEqual(cfg["parameter_constraints"]["incident_angle"]["min_value"], 1.0)
-        self.assertEqual(cfg["parameter_constraints"]["incident_angle"]["max_value"], 5.0)
+        merged = cfg["parameter_constraints"]
+        self.assertEqual(merged["incident_angle"]["min_value"], 1.0)
+        self.assertEqual(merged["incident_angle"]["max_value"], 5.0)
         reg = cfg.get("_parameter_registry")
         self.assertIsNotNone(reg)
         assert isinstance(reg, ParameterRegistry)
         self.assertIsNotNone(reg.get_by_alias_header("Incident Angle"))
+        # Effective registry must match final merged legacy dict (not stale disk-only bounds).
+        self.assertEqual(reg.to_legacy_parameter_constraints(), merged)
+        d = reg.get_by_canonical("incident_angle")
+        self.assertIsNotNone(d)
+        assert d is not None
+        self.assertEqual(d.min_value, 1.0)
+        self.assertEqual(d.max_value, 5.0)
+        self.assertAlmostEqual(d.step, 0.1)
 
     def test_legacy_entry_integer_from_discrete_step(self) -> None:
         d = ParameterDefinition(
